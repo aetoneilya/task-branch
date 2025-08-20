@@ -1,17 +1,32 @@
-use std::env;
 use dotenv::dotenv;
+use std::env;
 
-pub struct Config {
-    pub token: String,
-    pub base_url: String,
+pub struct JiraConfig {
+    pub jira_token: String,
+    pub jira_url: String,
 }
 
-impl Config {
+pub struct GitLabConfig {
+    pub gitlab_token: String,
+    pub gitlab_url: String,
+    pub gitlab_project: String,
+}
+
+impl JiraConfig {
     pub fn from_env() -> Self {
-        dotenv().ok();
         Self {
-            token: env::var("JIRA_TOKEN").expect("JIRA_TOKEN not set"),
-            base_url: env::var("JIRA_BASE_URL").expect("JIRA_BASE_URL not set"),
+            jira_token: env::var("JIRA_TOKEN").expect("JIRA_TOKEN not set"),
+            jira_url: env::var("JIRA_BASE_URL").expect("JIRA_BASE_URL not set"),
+        }
+    }
+}
+
+impl GitLabConfig {
+    pub fn from_env() -> Self {
+        Self {
+            gitlab_token: env::var("GITLAB_TOKEN").expect("GITLAB_TOKEN not set"),
+            gitlab_url: env::var("GITLAB_BASE_URL").expect("GITLAB_BASE_URL not set"),
+            gitlab_project: env::var("GITLAB_PROJECT").expect("GITLAB_PROJECT not set"),
         }
     }
 }

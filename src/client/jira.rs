@@ -1,7 +1,11 @@
+use std::time::Duration;
+
+use crate::client::jira::JiraError::RequestResultError;
 use chrono::{DateTime, FixedOffset};
 use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
+use thiserror::Error;
 
 #[derive(Debug)]
 pub struct JiraClient {
@@ -10,8 +14,19 @@ pub struct JiraClient {
     token: String,
 }
 
+#[derive(Debug, Error)]
+pub enum JiraError {
+    #[error("failed during request execution: {0}")]
+    RequestExecutionError(#[from] reqwest::Error),
+
+    #[error("git command exited with status {0}")]
+    RequestResultError(String),
+}
+
+pub(crate) type Result<T> = std::result::Result<T, JiraError>;
+
 impl JiraClient {
-pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
         JiraClient {
             client: Client::new(),
             base_url: base_url.into(),
@@ -28,22 +43,24 @@ pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
     }
 
     /// Выполняет произвольный JQL-запрос и возвращает задачи
-    pub fn search_issues(&self, jql: &str) -> Result<Vec<JiraIssue>, Box<dyn std::error::Error>> {
+    pub fn search_issues(&self, jql: &str) -> Result<Vec<JiraIssue>> {
         let encoded_jql = urlencoding::encode(jql);
         let url = format!("{}/rest/api/2/search?jql={}", self.base_url, encoded_jql);
 
-        let response = self.client.get(&url).headers(self.auth_headers()).send()?;
+        let response = self
+            .client
+            .get(&url)
+            .headers(self.auth_headers())
+            .timeout(Duration::from_secs(5))
+            .send()?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().unwrap_or_default();
-            return Err(format!("Request failed ({}): {}", status, text).into());
+            return Err(RequestResultError(
+                format!("Request failed ({}): {}", status, text).into(),
+            ));
         }
-
-        // let body = response.text()?;                      // consumes the response
-        // println!("Debug raw response:\n{}", body);        // print for debug
-        // let parsed: JiraSearchResult = serde_json::from_str(&body)?;  // parse from buffer
-        // Ok(parsed.issues)
 
         let search_result: JiraSearchResult = response.json()?;
         Ok(search_result.issues)
@@ -72,6 +89,22 @@ pub struct JiraIssueFields {
     pub updated: DateTime<FixedOffset>,
     pub status: Option<Status>,
     pub assignee: Option<Assignee>,
+    pub subtasks: Option<Vec<JiraSubtask>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JiraSubtask {
+    pub key: String,
+    pub id: String,
+    #[serde(rename = "self")]
+    pub self_link: String,
+    pub fields: JiraSubtaskFields,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JiraSubtaskFields {
+    pub summary: String,
+    pub status: Option<Status>,
 }
 
 #[derive(Debug, Deserialize)]

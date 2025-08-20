@@ -1,4 +1,4 @@
-use std::{fmt, process::Command};
+use std::process::Command;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

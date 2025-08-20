@@ -1,14 +1,11 @@
-use std::collections::HashMap;
 use crate::client::gitlab::MergeRequest;
 use crate::client::jira::{JiraIssue, JiraSubtask};
 use crate::state::State;
-use CliCommands::{Mr, Tasks};
 use clap::{Parser, Subcommand, ValueEnum};
-use dialoguer::Select;
 use dialoguer::theme::ColorfulTheme;
+use dialoguer::Select;
 use std::fmt;
-use std::thread::sleep;
-use std::time::Duration;
+use CliCommands::{Mr, Tasks};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

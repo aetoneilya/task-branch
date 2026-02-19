@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::client::jira::JiraError::RequestResultError;
 use chrono::{DateTime, FixedOffset};
+use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
@@ -20,7 +21,7 @@ pub enum JiraError {
     RequestExecutionError(#[from] reqwest::Error),
 
     #[error("git command exited with status {0}")]
-    RequestResultError(String),
+    RequestResultError(StatusCode, String),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, JiraError>;
@@ -42,14 +43,10 @@ impl JiraClient {
         headers
     }
 
-    /// Выполняет произвольный JQL-запрос и возвращает задачи
-    pub fn search_issues(&self, jql: &str) -> Result<Vec<JiraIssue>> {
-        let encoded_jql = urlencoding::encode(jql);
-        let url = format!("{}/rest/api/2/search?jql={}", self.base_url, encoded_jql);
-
+    fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let response = self
             .client
-            .get(&url)
+            .get(url)
             .headers(self.auth_headers())
             .timeout(Duration::from_secs(5))
             .send()?;
@@ -58,12 +55,25 @@ impl JiraClient {
             let status = response.status();
             let text = response.text().unwrap_or_default();
             return Err(RequestResultError(
+                status,
                 format!("Request failed ({}): {}", status, text).into(),
             ));
         }
 
-        let search_result: JiraSearchResult = response.json()?;
-        Ok(search_result.issues)
+        Ok(response.json()?)
+    }
+
+    pub fn get_issue_by_key(&self, key: &str) -> Result<JiraIssue> {
+        let url = format!("{}/rest/api/2/issue/{}", self.base_url, key);
+        self.get_json(&url)
+    }
+
+    pub fn search_issues(&self, jql: &str) -> Result<Vec<JiraIssue>> {
+        let encoded_jql = urlencoding::encode(jql);
+        let url = format!("{}/rest/api/2/search?jql={}", self.base_url, encoded_jql);
+
+        let result: JiraSearchResult = self.get_json(&url)?;
+        Ok(result.issues)
     }
 }
 
@@ -79,6 +89,16 @@ pub struct JiraIssue {
     #[serde(rename = "self")]
     pub self_link: String,
     pub fields: JiraIssueFields,
+}
+
+impl JiraIssue {
+    pub fn status(&self) -> &str {
+        self.fields
+            .status
+            .as_ref()
+            .map(|s| s.name.as_str())
+            .unwrap_or("unknown")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +119,16 @@ pub struct JiraSubtask {
     #[serde(rename = "self")]
     pub self_link: String,
     pub fields: JiraSubtaskFields,
+}
+
+impl JiraSubtask {
+    pub fn status(&self) -> &str {
+        self.fields
+            .status
+            .as_ref()
+            .map(|s| s.name.as_str())
+            .unwrap_or("unknown")
+    }
 }
 
 #[derive(Debug, Deserialize)]

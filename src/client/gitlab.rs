@@ -4,6 +4,7 @@ use gitlab::api::projects::merge_requests::{
 use gitlab::api::users::{CurrentUser, CurrentUserBuilderError};
 use gitlab::api::{ApiError, Query, projects};
 use gitlab::{Gitlab, GitlabError, RestError};
+use regex::Regex;
 use thiserror::Error;
 
 #[derive(Debug)]
@@ -60,19 +61,29 @@ impl GitLabClient {
         Ok(mrs)
     }
 
+    pub fn find_merge_request_by_key(&self, key: &str) -> Result<Vec<MergeRequest>> {
+        let endpoint = MergeRequests::builder()
+            .project(self.project.clone())
+            .search("");
+        
+        todo!()
+    }
+
     pub fn create_merge_request(
         &self,
         title: impl Into<String>,
         description: impl Into<String>,
+        source_branch: impl Into<String>,
     ) -> Result<MergeRequest> {
         let endpoint = CreateMergeRequest::builder()
             .project(self.project.clone())
             .title(title.into())
             .description(description.into())
+            .source_branch(source_branch.into())
+            .target_branch("master")
             .build()?;
 
-        let mr = endpoint.query(&self.client)?;
-
+        let mr: MergeRequest = endpoint.query(&self.client)?;
         Ok(mr)
     }
 }
@@ -101,6 +112,14 @@ impl MergeRequest {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    pub fn extract_task(&self) -> Option<String> {
+        let re = Regex::new(r"\b[A-Z]+-\d+\b").unwrap();
+        re.find_iter(&self.title)
+            .map(|m| m.as_str().to_string())
+            .into_iter()
+            .next()
     }
 
     pub fn state(&self) -> &str {

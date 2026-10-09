@@ -1,20 +1,20 @@
-use crate::client::git::{GitError, checkout_branch, current_branch};
-use crate::client::gitlab::{GitLabClient, GitLabError, MergeRequest, User};
+use crate::client::git::{
+    GitError, checkout_branch, create_branch, current_branch, local_branch_exists,
+};
+use crate::client::gitlab::{GitLabClient, GitLabError, MergeRequest};
 use crate::client::jira;
 use crate::client::jira::JiraError::RequestResultError;
 use crate::client::jira::{JiraClient, JiraIssue};
 use crate::config::{GitLabConfig, JiraConfig};
 use crate::core::StateError::{JiraError, MissingToken};
 use reqwest::StatusCode;
-use std::cell::OnceCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub struct JiraGitlabState {
     repo_path: PathBuf,
     jira_client: JiraClient,
     gitlab_client: GitLabClient,
-    gitlab_user: OnceCell<User>,
 }
 
 impl JiraGitlabState {
@@ -32,7 +32,6 @@ impl JiraGitlabState {
             repo_path,
             jira_client: JiraClient::new(jira_config.host, jira_token),
             gitlab_client: GitLabClient::create(gitlab_cfg.host, gitlab_token, gitlab_cfg.project)?,
-            gitlab_user: OnceCell::new(),
         };
 
         Ok(state)
@@ -50,8 +49,30 @@ impl JiraGitlabState {
             .map_err(StateError::from)
     }
 
+    pub fn repo_path(&self) -> &Path {
+        self.repo_path.as_path()
+    }
+
+    pub fn find_merge_requests_by_branch(&self, branch: &str) -> Result<Vec<MergeRequest>> {
+        self.gitlab_client
+            .find_merge_requests_by_branch(branch)
+            .map_err(StateError::from)
+    }
+
     pub fn checkout_to(&self, branch: &str) -> Result<()> {
         checkout_branch(self.repo_path.as_path(), branch).map_err(StateError::from)
+    }
+
+    pub fn local_branch_exists(&self, branch: &str) -> Result<bool> {
+        local_branch_exists(self.repo_path.as_path(), branch).map_err(StateError::from)
+    }
+
+    pub fn create_branch(&self, branch: &str) -> Result<()> {
+        create_branch(self.repo_path.as_path(), branch).map_err(StateError::from)
+    }
+
+    pub fn current_branch(&self) -> Result<String> {
+        current_branch(self.repo_path.as_path()).map_err(StateError::from)
     }
 
     pub fn find_issue_by_key(&self, key: &str) -> Result<Option<JiraIssue>> {

@@ -1,11 +1,14 @@
+mod tasks;
+
+use crate::client::git::key_from_branch_name;
 use crate::client::gitlab::MergeRequest;
 use crate::client::jira::{JiraIssue, JiraSubtask};
 use crate::config::load_config;
 use crate::core::JiraGitlabState;
 use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 use dialoguer::theme::ColorfulTheme;
-use dialoguer::FuzzySelect;
+use dialoguer::{Confirm, FuzzySelect, Input};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::{fmt, io};
@@ -26,6 +29,18 @@ enum CliCommands {
         #[command(subcommand)]
         list_option: Option<ListOption>,
     },
+    NewTask {
+        #[arg(long, short = 'k')]
+        key: Option<String>,
+    },
+    Mr {
+        #[arg(long, short = 'k')]
+        key: Option<String>,
+        #[arg(long, short = 't')]
+        title: Option<String>,
+        #[arg(long, short = 'd')]
+        description: Option<String>,
+    },
     Switch {
         #[arg(long, short = 'k')]
         key: Option<String>,
@@ -35,6 +50,43 @@ enum CliCommands {
         key: String,
     },
     Tui {},
+
+    /// Start a task: worktree, herdr workspace and a claude agent briefed from the Jira issue
+    Start {
+        #[arg(long, short = 'k')]
+        key: Option<String>,
+        /// Worktree, workspace and agent name
+        #[arg(long, short = 'n')]
+        name: Option<String>,
+        /// Default: <branch_prefix><KEY>-<name>
+        #[arg(long, short = 'b')]
+        branch: Option<String>,
+        /// What the agent should do, on top of the issue text
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+        /// Open as a tab in the current workspace
+        #[arg(long)]
+        tab: bool,
+        /// Don't switch focus to the new workspace
+        #[arg(long)]
+        bg: bool,
+    },
+    /// Task worktrees with local changes, agents and merge requests
+    Status {},
+    /// Start a reviewer agent next to the task's agent
+    Review { name: Option<String> },
+    /// Remove a finished task: worktree, branch and herdr workspace
+    Done {
+        name: Option<String>,
+        /// Remove every clean worktree whose MR is merged or closed
+        #[arg(long)]
+        merged: bool,
+        /// Skip the uncommitted / open MR / unpushed checks
+        #[arg(long, short = 'f')]
+        force: bool,
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 
     Completions {
         #[arg(value_enum)]
@@ -52,19 +104,38 @@ enum ListOption {
 pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let config = load_config().map_err(|err| err.to_string())?;
+    let workflow = config.workflow;
 
-    let state = JiraGitlabState::new(
-        cli.repo_path,
-        config.jira,
-        config.gitlab,
-    )
-    .map_err(|err| err.to_string())?;
+    let state = JiraGitlabState::new(cli.repo_path, config.jira, config.gitlab)
+        .map_err(|err| err.to_string())?;
 
     match cli.command {
         CliCommands::List { list_option } => cli_list(&state, list_option)?,
+        CliCommands::NewTask { key } => cli_new_task(&state, key)?,
+        CliCommands::Mr {
+            key,
+            title,
+            description,
+        } => cli_create_mr(&state, key, title, description)?,
         CliCommands::Switch { key } => select_mr(&state, key)?,
         CliCommands::Info { key } => cli_info(&state, key)?,
-        CliCommands::Tui {} => todo!(),
+        CliCommands::Tui {} => cli_tui(&state)?,
+        CliCommands::Start {
+            key,
+            name,
+            branch,
+            message,
+            tab,
+            bg,
+        } => tasks::cli_start(&state, &workflow, key, name, branch, message, tab, bg)?,
+        CliCommands::Status {} => tasks::cli_status(&state)?,
+        CliCommands::Review { name } => tasks::cli_review(&state, &workflow, name)?,
+        CliCommands::Done {
+            name,
+            merged,
+            force,
+            yes,
+        } => tasks::cli_done(&state, name, merged, force, yes)?,
         CliCommands::Completions { shell } => cli_completion(shell)?,
     }
 
@@ -74,8 +145,7 @@ pub fn run() -> Result<(), String> {
 //TODO fix returns completion for jira-gitlab not jg
 fn cli_completion(shell: Shell) -> Result<(), String> {
     let mut cmd = Cli::command(); // get clap Command
-    let bin_name = cmd.get_name().to_string();
-    generate(shell, &mut cmd, bin_name, &mut io::stdout());
+    generate(shell, &mut cmd, "jg", &mut io::stdout());
     Ok(())
 }
 
@@ -116,7 +186,103 @@ fn cli_info(state: &JiraGitlabState, key: String) -> Result<(), String> {
         }
     }
 
+    if !mrs.is_empty() {
+        println!("\nmerge requests:");
+        for mr in mrs {
+            println!("{}", display_mr(&mr, true));
+        }
+    }
+
     Ok(())
+}
+
+fn cli_new_task(state: &JiraGitlabState, key: Option<String>) -> Result<(), String> {
+    let issue = select_issue(state, key)?;
+    let suggested_branch = branch_name_for_issue(&issue);
+
+    let branch: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Branch name")
+        .default(suggested_branch)
+        .interact_text()
+        .map_err(|err| err.to_string())?;
+
+    if state
+        .local_branch_exists(&branch)
+        .map_err(|err| err.to_string())?
+    {
+        state.checkout_to(&branch).map_err(|err| err.to_string())?;
+        println!("Checked out existing branch {branch}");
+        return Ok(());
+    }
+
+    state
+        .create_branch(&branch)
+        .map_err(|err| err.to_string())?;
+    println!("Created and checked out branch {branch}");
+
+    Ok(())
+}
+
+fn cli_create_mr(
+    state: &JiraGitlabState,
+    key: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+) -> Result<(), String> {
+    let branch = current_git_branch(state)?;
+    let issue = match key.or_else(|| key_from_branch_name(&branch).map(str::to_string)) {
+        Some(key) => state
+            .find_issue_by_key(&key)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| format!("No issue found with key: {key}"))?,
+        None => select_issue(state, None)?,
+    };
+
+    let default_title = format!("{} {}", issue.key, issue.fields.summary);
+    let mr_title = match title {
+        Some(title) => title,
+        None => Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("Merge request title")
+            .default(default_title)
+            .interact_text()
+            .map_err(|err| err.to_string())?,
+    };
+
+    let default_description = issue.fields.description.clone().unwrap_or_default();
+
+    let mr_description = match description {
+        Some(description) => Some(description),
+        None => {
+            let use_issue_description = !default_description.is_empty()
+                && Confirm::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Use Jira issue description in merge request?")
+                    .default(true)
+                    .interact()
+                    .map_err(|err| err.to_string())?;
+
+            if use_issue_description {
+                Some(default_description)
+            } else {
+                let manual_description: String = Input::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Merge request description")
+                    .allow_empty(true)
+                    .interact_text()
+                    .map_err(|err| err.to_string())?;
+                Some(manual_description)
+            }
+        }
+    };
+
+    let mr = state
+        .create_merge_request(mr_title, mr_description)
+        .map_err(|err| err.to_string())?;
+
+    println!("Created merge request: {}", display_mr(&mr, true));
+    Ok(())
+}
+
+fn cli_tui(state: &JiraGitlabState) -> Result<(), String> {
+    crate::tui::run(state)
 }
 
 fn cli_list(state: &JiraGitlabState, list_option: Option<ListOption>) -> Result<(), String> {
@@ -220,6 +386,72 @@ fn select_mr(state: &JiraGitlabState, key: Option<String>) -> Result<(), String>
         .expect("Failed to checkout branch");
 
     Ok(())
+}
+
+fn select_issue(state: &JiraGitlabState, key: Option<String>) -> Result<JiraIssue, String> {
+    if let Some(key) = key {
+        return state
+            .find_issue_by_key(&key)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| format!("No issue found with key: {key}"));
+    }
+
+    let issues = state
+        .unresolved_current_user_issues()
+        .map_err(|err| err.to_string())?;
+
+    if issues.is_empty() {
+        return Err("No unresolved issues assigned to the current user".to_string());
+    }
+
+    let issue_strings: Vec<String> = issues
+        .iter()
+        .map(|issue| {
+            format!(
+                "{} [{}] {}",
+                issue.key,
+                issue.status(),
+                issue.fields.summary
+            )
+        })
+        .collect();
+
+    let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("Jira issues:")
+        .items(&issue_strings)
+        .interact_opt()
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "Issue wasn't selected".to_string())?;
+
+    Ok(issues
+        .into_iter()
+        .nth(selection)
+        .expect("Selected issue index should exist"))
+}
+
+fn branch_name_for_issue(issue: &JiraIssue) -> String {
+    format!("{}-{}", issue.key, slugify(&issue.fields.summary))
+}
+
+fn slugify(text: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+
+    slug.trim_matches('-').to_string()
+}
+
+fn current_git_branch(state: &JiraGitlabState) -> Result<String, String> {
+    state.current_branch().map_err(|err| err.to_string())
 }
 
 impl JiraGitlabState {

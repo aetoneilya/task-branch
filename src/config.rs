@@ -15,9 +15,32 @@ pub struct GitLabConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct WorkflowConfig {
+    /// Prepended to new task branches, e.g. "i.udalov/".
+    pub branch_prefix: String,
+    /// `jg start` asks for confirmation when this many agents are already live.
+    pub max_agents: usize,
+    /// Model for `jg review`; the claude default when empty.
+    pub review_model: Option<String>,
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        WorkflowConfig {
+            branch_prefix: String::new(),
+            max_agents: 4,
+            review_model: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub jira: JiraConfig,
     pub gitlab: GitLabConfig,
+    #[serde(default)]
+    pub workflow: WorkflowConfig,
 }
 
 pub fn load_config() -> Result<Config, ConfigError> {

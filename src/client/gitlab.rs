@@ -62,11 +62,26 @@ impl GitLabClient {
     }
 
     pub fn find_merge_request_by_key(&self, key: &str) -> Result<Vec<MergeRequest>> {
+        let mrs = self.list_merge_requests()?;
+        Ok(mrs
+            .into_iter()
+            .filter(|mr| {
+                mr.extract_task().as_deref() == Some(key)
+                    || mr.title().contains(key)
+                    || mr.source_branch().contains(key)
+            })
+            .collect())
+    }
+
+    /// Merge requests of any state and author opened from `branch`, newest first.
+    pub fn find_merge_requests_by_branch(&self, branch: &str) -> Result<Vec<MergeRequest>> {
         let endpoint = MergeRequests::builder()
             .project(self.project.clone())
-            .search("");
-        
-        todo!()
+            .source_branch(branch)
+            .build()?;
+
+        let mrs: Vec<MergeRequest> = endpoint.query(&self.client)?;
+        Ok(mrs)
     }
 
     pub fn create_merge_request(
@@ -103,6 +118,7 @@ pub struct MergeRequest {
     author: Option<User>,
     web_url: String,
     source_branch: String,
+    sha: Option<String>,
 }
 
 impl MergeRequest {
@@ -136,5 +152,10 @@ impl MergeRequest {
 
     pub fn source_branch(&self) -> &str {
         &self.source_branch
+    }
+
+    /// Head commit of the source branch when the MR was last updated.
+    pub fn sha(&self) -> Option<&str> {
+        self.sha.as_deref()
     }
 }

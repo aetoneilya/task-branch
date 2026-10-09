@@ -64,13 +64,26 @@ fn remote_branch_exists(path: &Path, branch: &str) -> Result<bool> {
 
 pub fn checkout_branch(path: &Path, branch: &str) -> Result<()> {
     if local_branch_exists(path, branch)? {
-        run_git(path, &["checkout", branch]).status()?;
+        let status = run_git(path, &["checkout", branch]).status()?;
+        if !status.success() {
+            return Err(GitError::NonZeroExit(format!(
+                "git checkout {} exited with status {}",
+                branch, status
+            )));
+        }
         return Ok(());
     }
 
     if remote_branch_exists(path, branch)? {
-        run_git(path, &["fetch", "origin", branch]).status()?;
-        run_git(
+        let fetch_status = run_git(path, &["fetch", "origin", branch]).status()?;
+        if !fetch_status.success() {
+            return Err(GitError::NonZeroExit(format!(
+                "git fetch origin {} exited with status {}",
+                branch, fetch_status
+            )));
+        }
+
+        let checkout_status = run_git(
             path,
             &[
                 "checkout",
@@ -81,11 +94,29 @@ pub fn checkout_branch(path: &Path, branch: &str) -> Result<()> {
             ],
         )
         .status()?;
+        if !checkout_status.success() {
+            return Err(GitError::NonZeroExit(format!(
+                "git checkout --track origin/{} exited with status {}",
+                branch, checkout_status
+            )));
+        }
 
         return Ok(());
     }
 
     Err(GitError::BranchNotFound(branch.to_string()))
+}
+
+pub fn create_branch(path: &Path, branch: &str) -> Result<()> {
+    let status = run_git(path, &["checkout", "-b", branch]).status()?;
+    if !status.success() {
+        return Err(GitError::NonZeroExit(format!(
+            "git checkout -b {} exited with status {}",
+            branch, status
+        )));
+    }
+
+    Ok(())
 }
 
 pub fn key_from_branch_name(branch_name: &str) -> Option<&str> {

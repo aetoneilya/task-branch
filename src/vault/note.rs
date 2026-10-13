@@ -116,6 +116,28 @@ impl Note {
         self.text = append_under_heading(&self.text, AGENT_NOTES, line);
     }
 
+    /// A `- line` item at the end of the note's own text: before the agents'
+    /// section when there is one.
+    pub fn append_line(&mut self, line: &str) {
+        let body_start = frontmatter_range(&self.text)
+            .and_then(|(_, end)| self.text[end..].find('\n').map(|n| end + n + 1))
+            .unwrap_or(0);
+        let cut = self.text[body_start..]
+            .match_indices(AGENT_NOTES)
+            .map(|(i, _)| body_start + i)
+            .find(|&i| i == body_start || self.text[..i].ends_with('\n'))
+            .unwrap_or(self.text.len());
+        let (before, after) = self.text.split_at(cut);
+        let mut text = before.trim_end_matches('\n').to_string();
+        text.push('\n');
+        text.push_str(&format!("- {line}\n"));
+        if !after.is_empty() {
+            text.push('\n');
+            text.push_str(after);
+        }
+        self.text = text;
+    }
+
     /// Re-reads the file, for a retry after `save` found it changed.
     pub fn reload(&mut self) -> Result<()> {
         *self = Note::read(&self.path)?;
@@ -384,5 +406,26 @@ mod tests {
     fn empty_frontmatter() {
         let out = set_key("---\n---\nbody", "state", &Value::String("idea".into()));
         assert_eq!(out, "---\nstate: idea\n---\nbody");
+    }
+
+    #[test]
+    fn appends_my_line_before_agent_notes() {
+        let mut note = Note {
+            path: PathBuf::from("x.md"),
+            text: "---\ndone: false\n---\nGoal.\n\n## Agent notes\n- a\n".into(),
+            modified: SystemTime::now(),
+            frontmatter: Mapping::new(),
+        };
+        note.append_line("2026-10-13: mine");
+        assert_eq!(
+            note.text,
+            "---\ndone: false\n---\nGoal.\n- 2026-10-13: mine\n\n## Agent notes\n- a\n"
+        );
+        let mut bare = Note {
+            text: "---\ndone: false\n---\n".into(),
+            ..note
+        };
+        bare.append_line("x");
+        assert_eq!(bare.text, "---\ndone: false\n---\n- x\n");
     }
 }

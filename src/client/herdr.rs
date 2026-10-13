@@ -215,23 +215,21 @@ pub fn focus_agent(target: &str) -> Result<()> {
     run_herdr(&["agent", "focus", target]).map(|_| ())
 }
 
-/// Starts claude in `pane`. An agent blocked by a startup dialog (folder trust)
-/// still counts as started: its initial prompt runs once the dialog is answered.
-/// So does a startup timeout: with an initial prompt claude goes straight to work
-/// and never shows the idle prompt herdr waits for — it is only left unnamed.
+/// Starts claude in the shell of `pane` and names the agent once herdr sees it.
+/// Typed as `command claude` rather than through `herdr agent start`: ai-launcher
+/// keeps putting a `claude` shell function into ~/.zshrc that refuses to run it.
 pub fn start_claude(name: &str, pane: &str, claude_args: &[&str]) -> Result<()> {
-    let mut args = vec!["agent", "start", name, "--kind", "claude", "--pane", pane];
-    if !claude_args.is_empty() {
-        args.push("--");
-        args.extend_from_slice(claude_args);
+    let mut command = String::from("command claude");
+    for arg in claude_args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
     }
-    match run_herdr(&args) {
-        Err(HerdrError::NonZeroExit(message)) if message.contains("agent_not_ready") => Ok(()),
-        Err(HerdrError::NonZeroExit(message)) if message.contains("\"timeout\"") => {
-            run_herdr(&["agent", "rename", pane, name]).map(|_| ())
-        }
-        other => other.map(|_| ()),
-    }
+    run_in_pane(pane, &command)?;
+    name_agent_when_up(pane, name)
+}
+
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 /// Herdr agent names must match [a-z][a-z0-9_-]{0,31}.

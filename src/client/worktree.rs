@@ -97,6 +97,11 @@ pub fn unpushed_commits(path: &Path, branch: &str) -> Result<usize> {
     Ok(count.parse().unwrap_or(0))
 }
 
+pub fn last_commit_time(path: &Path) -> Result<i64> {
+    let out = git_output(path, &["log", "-1", "--format=%ct"])?;
+    Ok(out.parse().unwrap_or(0))
+}
+
 pub fn branch_head(path: &Path, branch: &str) -> Result<String> {
     git_output(path, &["rev-parse", &format!("refs/heads/{branch}")])
 }

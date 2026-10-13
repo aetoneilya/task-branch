@@ -1,12 +1,15 @@
 //! The task tree as list rows: tasks → tickets → MRs, then the task's worktrees
 //! → agents; tickets without a task and worktrees without a ticket after them.
 
-use crate::table::{Table, Tree};
+use crate::table::{Mr, Table, Tree};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
+
+/// Days after which an open MR or an untouched worktree gets flagged.
+const STALE_DAYS: i64 = 7;
 
 static LEADING_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Z][A-Z0-9]+-\d+:?\s*").unwrap());
@@ -442,11 +445,13 @@ fn label(table: &Table, kind: &Kind) -> Vec<Span<'static>> {
                 "merged" => Color::Magenta,
                 _ => Color::DarkGray,
             };
-            vec![
+            let mut spans = vec![
                 colored(format!("!{}", mr.iid()), Color::Blue),
                 colored(format!(" {}", mr.state()), state_color),
-                dim(format!(" {}", clean(&LEADING_KEY.replace(mr.title(), "")))),
-            ]
+            ];
+            spans.extend(review_spans(table.mr(*m)));
+            spans.push(dim(format!(" {}", clean(&LEADING_KEY.replace(mr.title(), "")))));
+            spans
         }
         Kind::Tree(t) => tree_label(table.tree(*t)),
         Kind::Agent(t, a) => {
@@ -458,6 +463,52 @@ fn label(table: &Table, kind: &Kind) -> Vec<Span<'static>> {
             ]
         }
     }
+}
+
+/// What an open MR waits on: draft, pipeline, approvals, unresolved threads,
+/// conflicts — short enough for a row.
+pub fn review_spans(mr: &Mr) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if !mr.opened() {
+        return spans;
+    }
+    if mr.mr.draft {
+        spans.push(dim(" draft"));
+    }
+    // waiting long for review is worth seeing
+    let age = mr
+        .mr
+        .created_at
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days());
+    if let Some(days) = age.filter(|&d| d >= STALE_DAYS) {
+        spans.push(colored(format!(" {days}d"), Color::Yellow));
+    }
+    let Some(review) = &mr.review else {
+        return spans;
+    };
+    match review.pipeline.as_deref() {
+        Some("success") => spans.push(colored(" ci✓", Color::Green)),
+        Some("failed") => spans.push(colored(" ci✗", Color::Red)),
+        Some("canceled" | "skipped") => spans.push(dim(" ci–")),
+        Some(_) => spans.push(colored(" ci…", Color::Yellow)),
+        None => {}
+    }
+    if !review.approved_by.is_empty() {
+        spans.push(colored(format!(" ✔{}", review.approved_by.len()), Color::Green));
+    }
+    match review.unresolved {
+        0 => {}
+        1 => spans.push(colored(" 1 thread", Color::Yellow)),
+        n => spans.push(colored(format!(" {n} threads"), Color::Yellow)),
+    }
+    match mr.mr.detailed_merge_status.as_deref() {
+        Some("conflict") => spans.push(colored(" conflict", Color::Red)),
+        Some("need_rebase") => spans.push(colored(" rebase", Color::Red)),
+        _ => {}
+    }
+    spans
 }
 
 fn tree_label(tree: &Tree) -> Vec<Span<'static>> {
@@ -473,6 +524,15 @@ fn tree_label(tree: &Tree) -> Vec<Span<'static>> {
     }
     if tree.finished {
         spans.push(dim(" ✓ merged"));
+    } else if tree.agents.is_empty() && tree.changes == Some(0) {
+        // nobody on it and no commits for a while: forgotten, or done and not cleaned up
+        let quiet = tree
+            .last_commit
+            .map(|t| (chrono::Utc::now().timestamp() - t) / 86_400)
+            .filter(|&d| d >= STALE_DAYS);
+        if let Some(days) = quiet {
+            spans.push(colored(format!(" quiet {days}d"), Color::Yellow));
+        }
     }
     spans
 }

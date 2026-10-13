@@ -9,11 +9,11 @@ use dialoguer::{Confirm, FuzzySelect};
 use std::path::Path;
 
 const REVIEW_PROMPT: &str = "\
-Ты ревьюер, код писал другой агент. Проверь изменения этой ветки: \
-`git diff origin/HEAD...HEAD` и незакоммиченные правки (`git diff HEAD`). \
-Ищи баги корректности, сломанные контракты, ветки без тестов. Ничего не правь и не коммить. \
-Выдай находки по убыванию важности: файл:строка, проблема, сценарий, при котором ломается. \
-Если находок нет — так и скажи.";
+You are a reviewer; another agent wrote the code. Review this branch's changes: \
+`git diff origin/HEAD...HEAD` and uncommitted edits (`git diff HEAD`). \
+Look for correctness bugs, broken contracts, branches without tests. Don't edit or commit anything. \
+List findings, most severe first: file:line, the problem, a scenario where it breaks. \
+If there are none, say so.";
 
 pub(super) fn cli_review(
     state: &JiraGitlabState,
@@ -169,7 +169,7 @@ fn finish_worktree(
     Ok(())
 }
 
-fn close_herdr_views(path: &Path) {
+pub(super) fn close_herdr_views(path: &Path) {
     if !herdr::available() {
         return;
     }

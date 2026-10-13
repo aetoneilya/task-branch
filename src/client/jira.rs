@@ -70,6 +70,30 @@ impl JiraClient {
         Ok(response.json()?)
     }
 
+    /// The workflow transitions available on the issue now.
+    pub fn transitions(&self, key: &str) -> Result<Vec<Transition>> {
+        let url = format!("{}/rest/api/2/issue/{}/transitions", self.base_url, key);
+        let result: Transitions = self.get_json(&url)?;
+        Ok(result.transitions)
+    }
+
+    pub fn transition(&self, key: &str, transition_id: &str) -> Result<()> {
+        let url = format!("{}/rest/api/2/issue/{}/transitions", self.base_url, key);
+        let response = self
+            .client
+            .post(&url)
+            .headers(self.auth_headers())
+            .timeout(Duration::from_secs(10))
+            .json(&serde_json::json!({ "transition": { "id": transition_id } }))
+            .send()?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().unwrap_or_default();
+            return Err(RequestResultError(status, text));
+        }
+        Ok(())
+    }
+
     pub fn get_issue_by_key(&self, key: &str) -> Result<JiraIssue> {
         let url = format!("{}/rest/api/2/issue/{}", self.base_url, key);
         self.get_json(&url)
@@ -94,6 +118,25 @@ impl JiraClient {
         let result: JiraSearchResult = self.get_json(&url)?;
         Ok(result.issues)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct Transitions {
+    transitions: Vec<Transition>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Transition {
+    pub id: String,
+    pub name: String,
+    pub to: TransitionTarget,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransitionTarget {
+    pub name: String,
+    #[serde(rename = "statusCategory")]
+    pub status_category: StatusCategory,
 }
 
 #[derive(Debug, Deserialize)]

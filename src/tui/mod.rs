@@ -24,6 +24,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
+/// herdr is local and quick: agent states are polled this often.
+const AGENTS_EVERY: Duration = Duration::from_secs(2);
 const MESSAGE_FOR: Duration = Duration::from_secs(4);
 /// Narrower than this, the details pane is hidden unless `p` asks for it.
 const PREVIEW_MIN_WIDTH: u16 = 110;
@@ -43,6 +45,8 @@ enum Prompt {
     NewTask,
     /// y/n before `wt start <key>`: it creates a note, a worktree and an agent.
     StartTicket(String),
+    /// A line for the task note.
+    NoteLine(PathBuf),
 }
 
 enum Update {
@@ -50,6 +54,7 @@ enum Update {
     /// Lazily loaded details, by key.
     Detail(String, String),
     Message(String),
+    Agents(Vec<herdr::Agent>),
 }
 
 struct App {
@@ -79,6 +84,10 @@ struct App {
     tx: Sender<Update>,
     rx: Receiver<Update>,
     quit: bool,
+    /// Run as a herdr popup (`WT_POPUP=1`): going to some work closes it.
+    popup: bool,
+    agents_polled: Instant,
+    agents_polling: bool,
 }
 
 impl App {
@@ -88,7 +97,7 @@ impl App {
             .as_ref()
             .ok_or("no [vault] section in ~/.config/worktable/config.toml")?;
         let (tasks, _) = load_tasks(vault);
-        let table = table::build(&config, tasks, false);
+        let table = table::build_cached(&config, tasks);
         let (tx, rx) = channel();
         let mut app = App {
             config: Arc::new(config),
@@ -114,6 +123,9 @@ impl App {
             tx,
             rx,
             quit: false,
+            popup: std::env::var_os("WT_POPUP").is_some(),
+            agents_polled: Instant::now(),
+            agents_polling: false,
         };
         app.rebuild();
         app.refresh();
@@ -136,6 +148,9 @@ impl App {
             }
             if self.last_refresh.elapsed() > REFRESH_EVERY {
                 self.refresh();
+            }
+            if !self.agents_polling && self.agents_polled.elapsed() > AGENTS_EVERY {
+                self.poll_agents();
             }
         }
         Ok(())
@@ -163,6 +178,43 @@ impl App {
         });
     }
 
+    fn poll_agents(&mut self) {
+        if !herdr::available() {
+            return;
+        }
+        self.agents_polling = true;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Update::Agents(herdr::list_agents().unwrap_or_default()));
+        });
+    }
+
+    /// Agent rows whose agent waits for me: asking (blocked) or finished unseen (done).
+    fn waiting(&self) -> Vec<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| match r.kind {
+                Kind::Agent(t, a) => {
+                    let label = &self.table.tree(t).agents[a];
+                    label.ends_with(":blocked") || label.ends_with(":done")
+                }
+                _ => false,
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// `w`: the next waiting agent after the selection, round the list.
+    fn next_waiting(&mut self) {
+        let waiting = self.waiting();
+        let current = self.list.selected().unwrap_or(0);
+        match waiting.iter().find(|&&i| i > current).or(waiting.first()) {
+            Some(&i) => self.select(i),
+            None => self.say("no agent is waiting"),
+        }
+    }
+
     fn apply(&mut self, update: Update) {
         match update {
             Update::Table(table, updated) => {
@@ -183,6 +235,12 @@ impl App {
                 self.details.insert(key, text);
             }
             Update::Message(text) => self.say(text),
+            Update::Agents(agents) => {
+                self.agents_polling = false;
+                self.agents_polled = Instant::now();
+                self.table.update_agents(&agents);
+                self.rebuild();
+            }
         }
     }
 
@@ -329,6 +387,18 @@ impl App {
                 self.say("refreshing…");
             }
             KeyCode::Char('?') => self.help = true,
+            KeyCode::Char('w') => self.next_waiting(),
+            KeyCode::Char('N') => match self.note() {
+                Some(path) => self.prompt = Some((Prompt::NoteLine(path), String::new())),
+                None => self.say("no note here"),
+            },
+            KeyCode::Char('a') => match self.current().map(|r| r.kind.clone()) {
+                Some(Kind::Loose(i)) => {
+                    let key = self.table.loose[i].key.clone();
+                    self.run_wt(terminal, &["attach", &key]);
+                }
+                _ => self.say("a works on a ticket without a task"),
+            },
             KeyCode::Char('p') => self.preview = Some(!self.preview_shown),
             KeyCode::Enter => self.go(terminal),
             KeyCode::Char('b') => self.open_in_browser(),
@@ -347,14 +417,19 @@ impl App {
                     self.run_wt(terminal, &["review", &name]);
                 }
             }
-            KeyCode::Char('d') => {
-                if let Some(t) = self.tree() {
-                    let name = self.table.tree(t).wt.name();
-                    self.run_wt(terminal, &["done", &name]);
-                } else {
-                    self.say("d works on a worktree");
+            KeyCode::Char('d') => match self.current().map(|r| r.kind.clone()) {
+                Some(Kind::Task(i)) => {
+                    let task = self.table.tasks[i].task.name.clone();
+                    self.run_wt(terminal, &["done", &task]);
                 }
-            }
+                _ => match self.tree() {
+                    Some(t) => {
+                        let name = self.table.tree(t).wt.name();
+                        self.run_wt(terminal, &["done", &name]);
+                    }
+                    None => self.say("d works on a task or a worktree"),
+                },
+            },
             _ => {}
         }
     }
@@ -388,6 +463,16 @@ impl App {
                         }
                     }
                     Prompt::StartTicket(_) => {}
+                    Prompt::NoteLine(path) => {
+                        if !text.trim().is_empty() {
+                            let line = format!("{}: {}", chrono::Local::now().format("%Y-%m-%d"), text.trim());
+                            match add_note_line(&path, &line) {
+                                Ok(()) => self.say("noted"),
+                                Err(e) => self.say(format!("! {e}")),
+                            }
+                            self.refresh();
+                        }
+                    }
                     Prompt::NewTask => {
                         if !text.trim().is_empty() {
                             self.run_wt(terminal, &["start", text.trim()]);
@@ -507,8 +592,13 @@ impl App {
                     "--tree".to_string(),
                     tree.wt.name(),
                 ];
-                self.say(format!("opening {}…", tree.wt.name()));
-                self.run_wt_background(args);
+                if self.popup {
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    self.run_wt(terminal, &args);
+                } else {
+                    self.say(format!("opening {}…", tree.wt.name()));
+                    self.run_wt_background(args);
+                }
             }
             Kind::Mr(_) => self.open_in_browser(),
             Kind::Ticket(key) => self.run_wt(terminal, &["select", &key]),
@@ -533,11 +623,13 @@ impl App {
     }
 
     fn focus(&mut self, agent: &str) {
-        let text = match herdr::focus_agent(agent) {
-            Ok(()) => format!("→ {agent}"),
-            Err(e) => format!("! {e}"),
-        };
-        self.say(text);
+        match herdr::focus_agent(agent) {
+            Ok(()) => {
+                self.say(format!("→ {agent}"));
+                self.quit |= self.popup;
+            }
+            Err(e) => self.say(format!("! {e}")),
+        }
     }
 
     fn open_in_browser(&mut self) {
@@ -602,6 +694,12 @@ impl App {
             .args(args)
             .status()
             .is_ok_and(|s| s.success());
+        // as a popup, work that was opened is where to be now; errors stay readable
+        let navigates = matches!(args.first(), Some(&"select" | &"start" | &"add"));
+        if ok && navigates && self.popup {
+            self.quit = true;
+            return;
+        }
         println!("\n⏎ back to wt");
         let _ = std::io::stdin().read_line(&mut String::new());
         *terminal = ratatui::init();
@@ -653,6 +751,7 @@ impl App {
                 Some((Prompt::Filter, text)) => ("/ ".to_string(), text.clone()),
                 Some((Prompt::AddTicket(task), text)) => (format!("ticket for \"{task}\": "), text.clone()),
                 Some((Prompt::NewTask, text)) => ("new task: ".to_string(), text.clone()),
+                Some((Prompt::NoteLine(_), text)) => ("note: ".to_string(), text.clone()),
                 Some((Prompt::StartTicket(key), _)) => {
                     let summary = self.table.tickets.get(key).map(|t| clean(&t.summary)).unwrap_or_default();
                     (format!("start a task from {key} «{summary}»? "), "y / n".to_string())
@@ -708,13 +807,16 @@ impl App {
                     keys.push(("⏎", "open".into()));
                     keys.push(("s", "add ticket".into()));
                     keys.push(("c", "sessions".into()));
+                    keys.push(("d", "close task".into()));
                 }
                 Kind::Loose(i) if !self.loose_has_work(*i) => {
                     keys.push(("⏎", "start task".into()));
+                    keys.push(("a", "attach to task".into()));
                     keys.push(("b", "jira".into()));
                 }
                 Kind::Loose(_) => {
                     keys.push(("⏎", "open".into()));
+                    keys.push(("a", "attach to task".into()));
                     keys.push(("b", "jira".into()));
                     keys.push(("s", "start".into()));
                     keys.push(("c", "sessions".into()));
@@ -749,6 +851,7 @@ impl App {
                 }
             }
             if under_task {
+                keys.push(("N", "note line".into()));
                 keys.push(("o", "obsidian".into()));
                 keys.push(("e", "edit note".into()));
             }
@@ -765,6 +868,10 @@ impl App {
         }
         spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
         let all = if self.all { "active" } else { "all" };
+        if !self.waiting().is_empty() {
+            spans.push(Span::styled("w ", key_style));
+            spans.push(Span::raw("next waiting  "));
+        }
         let preview = if self.preview_shown { "hide details" } else { "details" };
         for (key, label) in [("n", "new task"), ("/", "filter"), (".", all), ("p", preview), ("r", "refresh"), ("?", "help"), ("q", "quit")] {
             spans.push(Span::styled(format!("{key} "), Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)));
@@ -795,6 +902,13 @@ impl App {
             ),
             Span::raw("   "),
         ];
+        let waiting = self.waiting().len();
+        if waiting > 0 {
+            spans.push(Span::styled(
+                format!("⚑ {waiting} waiting   "),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
         spans.push(if self.refreshing {
             Span::styled("⟳ refreshing…", Style::default().fg(Color::Yellow))
         } else if let Some(synced) = self.synced {
@@ -806,8 +920,9 @@ impl App {
             Span::raw("")
         });
         if !self.online {
+            let cached = !self.table.tickets.is_empty() || !self.table.mrs.is_empty();
             spans.push(Span::styled(
-                "  without Jira and GitLab",
+                if cached { "  cached" } else { "  without Jira and GitLab" },
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -821,8 +936,11 @@ impl App {
             "b          ticket / MR in the browser   o  note in Obsidian       e  note in $EDITOR",
             "s          ticket: wt start KEY; task: add a ticket (wt add)",
             "n          new task (wt start)          c  pick a session (wt select --session)",
-            "R          review worktree (wt review)  d  remove worktree (wt done)",
+            "a          ticket without a task: attach it to a task (wt attach)",
+            "N          add a dated line to the task note",
+            "R          review worktree (wt review)  d  worktree: remove it; task: close it with its Jira tickets",
             "/          filter, Esc clears           .  all / active only      r  refresh",
+            "w          next agent waiting for you (blocked, or done and unseen)",
             "p          show / hide details (hidden by default under 110 columns)",
             "ctrl-d/u   scroll details               ctrl-l  redraw            q  quit",
         ];
@@ -911,6 +1029,31 @@ impl App {
                     bold(format!(" {}", clean(mr.mr.title()))),
                 ]));
                 lines.push(Line::from(dim(format!("{} · {}", mr.mr.state(), mr.mr.source_branch()))));
+                if let Some(review) = &mr.review {
+                    let mut status = vec![Span::raw("pipeline ")];
+                    status.extend(rows::review_spans(mr).into_iter().filter(|s| s.content.contains("ci")));
+                    if review.pipeline.is_none() {
+                        status.push(dim("none".to_string()));
+                    }
+                    lines.push(Line::from(status));
+                    lines.push(Line::from(if review.approved_by.is_empty() {
+                        dim("no approvals".to_string())
+                    } else {
+                        Span::styled(
+                            format!("approved by {}", review.approved_by.join(", ")),
+                            Style::default().fg(Color::Green),
+                        )
+                    }));
+                    if review.unresolved > 0 {
+                        lines.push(Line::from(Span::styled(
+                            format!("{} unresolved thread(s)", review.unresolved),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                    }
+                }
+                if let Some(status) = &mr.mr.detailed_merge_status {
+                    lines.push(Line::from(dim(format!("merge: {}", status.replace('_', " ")))));
+                }
                 if !mr.keys.is_empty() {
                     lines.push(Line::from(dim(mr.keys.join(" "))));
                 }
@@ -968,6 +1111,63 @@ fn agent_name(table: &Table, tree: usize, agent: usize) -> String {
     label.rsplit_once(':').map_or(label.as_str(), |(n, _)| n).to_string()
 }
 
+/// Appends `- line` to the note's own text under the notes lock, rereading it
+/// first: agents may have just written to it.
+fn add_note_line(path: &Path, line: &str) -> Result<(), String> {
+    let _lock = table::lock().map_err(|e| e.to_string())?;
+    let mut note = crate::vault::note::Note::read(path).map_err(|e| e.to_string())?;
+    note.append_line(line);
+    note.save().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Jira wiki markup as plain text worth reading: headings, lists, code blocks,
+/// links, monospace, images and tables lose their syntax.
+fn jira_text(markup: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    static HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^h([1-6])\.\s*").unwrap());
+    static BLOCK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\{(code|noformat|quote|panel)(:[^}]*)?\}\s*$").unwrap());
+    static BULLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^([*#-]+)\s+").unwrap());
+    static LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^|\]]+)\|([^\]]+)\]").unwrap());
+    static BARE_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(https?://[^\]]+)\]").unwrap());
+    static MONO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{(.+?)\}\}").unwrap());
+    static IMAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"!([^!|\s]+)(\|[^!]*)?!").unwrap());
+    static COLOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{color(:[^}]*)?\}").unwrap());
+
+    let mut out = Vec::new();
+    let mut in_block = false;
+    for line in markup.lines() {
+        if BLOCK.is_match(line.trim()) {
+            in_block = !in_block;
+            out.push("────".to_string());
+            continue;
+        }
+        if in_block {
+            out.push(format!("  {line}"));
+            continue;
+        }
+        let mut text = line.to_string();
+        if let Some(c) = HEADING.captures(&text) {
+            let level: usize = c[1].parse().unwrap_or(1);
+            text = format!("{} {}", "#".repeat(level), &text[c[0].len()..]);
+        } else if let Some(c) = BULLET.captures(&text) {
+            let depth = c[1].len();
+            text = format!("{}• {}", "  ".repeat(depth - 1), &text[c[0].len()..]);
+        } else if text.trim() == "----" {
+            text = "────────".to_string();
+        }
+        text = LINK.replace_all(&text, "$1 ($2)").into_owned();
+        text = BARE_LINK.replace_all(&text, "$1").into_owned();
+        text = MONO.replace_all(&text, "`$1`").into_owned();
+        text = IMAGE.replace_all(&text, "[image $1]").into_owned();
+        text = COLOR.replace_all(&text, "").into_owned();
+        text = text.replace("||", " | ");
+        out.push(text);
+    }
+    out.join("\n")
+}
+
 fn display_path(path: &Path) -> String {
     let path = path.to_string_lossy();
     match dirs::home_dir() {
@@ -990,6 +1190,7 @@ fn load_detail(config: &Config, key: &str) -> String {
             Ok(issue) => issue
                 .fields
                 .description
+                .map(|d| jira_text(&d))
                 .unwrap_or_else(|| "(no description)".to_string()),
             Err(e) => format!("! {e}"),
         };
@@ -1034,4 +1235,18 @@ fn load_detail(config: &Config, key: &str) -> String {
             .unwrap_or_else(|e| format!("! {e}"));
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::jira_text;
+
+    #[test]
+    fn jira_markup_reads_as_text() {
+        let markup = "h2. Цель\n* пункт с {{code}}\n** вложенный [ссылка|https://x.y]\n{code:java}\nint a;\n{code}\n!shot.png|thumbnail!";
+        assert_eq!(
+            jira_text(markup),
+            "## Цель\n• пункт с `code`\n  • вложенный ссылка (https://x.y)\n────\n  int a;\n────\n[image shot.png]"
+        );
+    }
 }

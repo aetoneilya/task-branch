@@ -202,8 +202,9 @@ wt status                   the table in plain text
 
 `wt start` and `wt add` return at once: fetch and checkout of ucp take ~30 s, so
 the new tab runs the hidden `wt prepare <spec>` — step lines with a spinner and
-git's own checkout progress, then the brief, then it execs claude in the worktree
-(named in the background once herdr detects it).
+git's own checkout progress, then the brief; the tab's shell then cds into the
+worktree and starts `command claude` — herdr shows the branch of the shell's
+cwd. The agent is named in the background once herdr detects it.
 
 ### `wt add [<task>] <KEY> [--in <worktree>] [-n name] [--tab] [--bg]`
 
@@ -239,9 +240,12 @@ and scripts read, so it is kept stable.
 ```
 wt review [<worktree>] [--model M]   reviewer agent next to the task agent
 wt done [<task | worktree>] [--merged] [--force] [-y]
-                    remove worktrees, branches, herdr views; on a whole task also
-                    write the final mrs/branches and done: true. Same safety
-                    checks as jg done. --merged: sweep all finished work
+                    remove worktrees, branches, herdr views. On a task: refuses
+                    while anything is open (uncommitted, open MR, unpushed),
+                    closes my open tickets of it in Jira (a done-category
+                    transition like Closed, never Cancelled; others' tickets are
+                    left open), writes done: true, closed, mrs, branches.
+                    --merged: sweep all finished worktrees
 wt note "<text>"    (agents) append to the task's `## Agent notes`
 wt open [<task>]    the note in Obsidian
 wt attach-session <id> <task>   a claude session held outside a worktree
@@ -259,9 +263,20 @@ only by `wt ticket new`.
 ## TUI
 
 `wt` (or `wt tui`): the task tree on the left, details of the selection on the
-right. The offline table (notes, worktrees, agents) renders at once; a background
-refresh fills in Jira and GitLab, writes task states and sessions back like
-`wt status`, and repeats every minute.
+right. The first frame comes from notes, worktrees, agents and the Jira/GitLab
+data cached by the last online build; a background refresh replaces it, writes
+task states, sessions and found tickets back like `wt status`, and repeats every
+minute. A service that does not answer keeps its cached data, with a warning.
+Agent states are polled from herdr every 2 s; the header counts agents waiting
+for me (blocked, or done and unseen) and `w` jumps to the next one.
+
+In herdr, `prefix+t` opens it as a popup (`[[keys.command]]`, `type = "popup"`,
+`WT_POPUP=1`): going to some work — focusing an agent, select, start — closes it.
+
+Rows flag what waits too long: an open MR older than 7 days (`12d`), a worktree
+with no agent, nothing uncommitted and no commit for 7 days (`quiet 12d`). Open
+MRs show draft, pipeline (`ci✓` `ci✗` `ci…`), approvals (`✔2`), unresolved
+threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 
 - **Rows**: task → its tickets → MRs without a worktree; the task's worktrees →
   the MR of their branch, agents. Tasks go by state (active, review, idea,
@@ -281,10 +296,16 @@ refresh fills in Jira and GitLab, writes task states and sessions back like
 | `⏎` | task, ticket | `wt select` |
 | `b` | ticket, MR, worktree | open in the browser |
 | `o` / `e` | anything under a task | note in Obsidian / in `$EDITOR` |
+| `⏎` | ticket nothing is done on | asks y/n, then `wt start KEY` |
 | `s` | ticket / task | `wt start KEY` / asks a key for `wt add` |
+| `a` | ticket without a task | `wt attach KEY`: pick a task, the key joins its `tickets:` |
+| `N` | anything under a task | a dated line at the end of the note's own text |
+| `w` | — | next agent waiting for me |
+| `p` | — | details pane on/off (hidden under 110 columns) |
 | `n` | — | asks a name for `wt start` |
 | `c` | task, ticket | `wt select --session` |
 | `R`, `d` | worktree | `wt review`, `wt done` |
+| `d` | task | `wt done "<task>"`: close it with its Jira tickets |
 | `space` `h` `l` | — | fold, fold / to parent, unfold |
 | `r`, `?`, `q` | — | refresh, keys, quit |
 

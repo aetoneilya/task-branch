@@ -96,6 +96,12 @@ enum CliCommands {
         #[arg(long)]
         bg: bool,
     },
+    /// Put a ticket into a task without starting work on it (no worktree)
+    Attach {
+        key: String,
+        /// The task; a picker when omitted
+        task: Option<String>,
+    },
     /// Go back to a task: its agent, or claude resuming the last session there
     Select {
         /// Task name or ticket key; a picker when omitted
@@ -141,6 +147,9 @@ enum CliCommands {
         name: Option<String>,
     },
     /// Remove a finished task: worktree, branch and herdr workspace
+    /// Close a task: `wt done "<task>"` (or a ticket of it) removes its finished
+    /// worktrees, closes my tickets in Jira and marks the note done. With a
+    /// worktree name, or none inside one: remove that worktree
     Done {
         name: Option<String>,
         /// Remove every clean worktree whose MR is merged or closed
@@ -204,6 +213,15 @@ pub fn run() -> Result<(), String> {
         }
         CliCommands::Note { text } => return work::cli_note(&config, text),
         CliCommands::Prepare { spec } => return work::cli_prepare(&spec),
+        CliCommands::Attach { key, task } => return work::cli_attach(&config, &key, task),
+        CliCommands::Done {
+            name: Some(name),
+            merged: false,
+            force,
+            yes,
+        } if work::names_task(&config, &name) => {
+            return work::cli_done_task(&config, &name, force, yes);
+        }
         _ => {}
     }
     let (repo_path, project) = work::legacy_repo(&config, &cli.repo_path);
@@ -233,7 +251,8 @@ pub fn run() -> Result<(), String> {
         | CliCommands::Add { .. }
         | CliCommands::Select { .. }
         | CliCommands::Note { .. }
-        | CliCommands::Prepare { .. } => unreachable!(),
+        | CliCommands::Prepare { .. }
+        | CliCommands::Attach { .. } => unreachable!(),
         CliCommands::Review { name } => tasks::cli_review(&state, &workflow, name)?,
         CliCommands::Done {
             name,

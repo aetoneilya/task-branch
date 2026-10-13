@@ -1,4 +1,4 @@
-use crate::client::gitlab::{MergeRequest, my_merge_requests};
+use crate::client::gitlab::{MergeRequest, MrReview, mr_review, my_merge_requests};
 use crate::client::jira::{JiraClient, JiraIssue};
 use crate::client::worktree::{self, Worktree};
 use crate::client::{herdr, sessions};
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// Merged and closed MRs older than this are not fetched.
 const MR_LOOKBACK_DAYS: i64 = 90;
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Ticket {
     pub key: String,
     pub summary: String,
@@ -44,11 +44,13 @@ impl Ticket {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Mr {
     pub mr: MergeRequest,
     /// Ticket keys in the source branch and the title.
     pub keys: Vec<String>,
+    /// Pipeline, approvals and unresolved threads; open MRs only.
+    pub review: Option<MrReview>,
 }
 
 impl Mr {
@@ -72,6 +74,8 @@ pub struct Tree {
     pub mr: Option<usize>,
     /// Its MR is merged or closed and nothing local is left: safe to remove.
     pub finished: bool,
+    /// Unix time of the branch's last commit.
+    pub last_commit: Option<i64>,
 }
 
 impl Tree {
@@ -124,6 +128,51 @@ pub struct Table {
 /// `online: false` skips Jira and GitLab: worktrees, agents, workspaces and
 /// sessions only, without task states — for commands that must answer fast.
 pub fn build(config: &Config, tasks: Vec<Task>, online: bool) -> Table {
+    build_with(config, tasks, online, None)
+}
+
+/// Offline, but with the tickets and MRs of the last online build: the TUI's
+/// first frame shows them at once while the refresh runs.
+pub fn build_cached(config: &Config, tasks: Vec<Task>) -> Table {
+    build_with(config, tasks, false, RemoteCache::load())
+}
+
+/// What Jira and GitLab said last time, kept between runs.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RemoteCache {
+    tickets: HashMap<String, Ticket>,
+    mrs: Vec<Mr>,
+}
+
+impl RemoteCache {
+    fn path() -> PathBuf {
+        dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("worktable")
+            .join("remote.json")
+    }
+
+    fn load() -> Option<RemoteCache> {
+        serde_json::from_slice(&std::fs::read(RemoteCache::path()).ok()?).ok()
+    }
+
+    fn save(tickets: &HashMap<String, Ticket>, mrs: &[Mr]) {
+        #[derive(serde::Serialize)]
+        struct Ref<'a> {
+            tickets: &'a HashMap<String, Ticket>,
+            mrs: &'a [Mr],
+        }
+        let path = RemoteCache::path();
+        let tmp = path.with_extension("json.tmp");
+        if let Ok(json) = serde_json::to_vec(&Ref { tickets, mrs }) {
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(tmp, path);
+            }
+        }
+    }
+}
+
+fn build_with(config: &Config, tasks: Vec<Task>, online: bool, cached: Option<RemoteCache>) -> Table {
     // Jira answers in about a second, so every ticket query starts at once: mine,
     // the keys of open tasks and worktree branches, and those of open MRs as soon
     // as GitLab lists them
@@ -173,36 +222,33 @@ pub fn build(config: &Config, tasks: Vec<Task>, online: bool) -> Table {
         tickets
     });
 
+    let (tickets, mrs) = match cached {
+        Some(cache) if !online => (Ok(cache.tickets), Ok(cache.mrs)),
+        _ => (tickets, mrs),
+    };
     let mut warnings = Vec::new();
     let complete = online && tickets.is_ok() && mrs.is_ok();
+    // a service that did not answer is shown as it was last time, not as empty
+    let mut fallback = (!complete && online).then(RemoteCache::load).flatten();
     let tickets = tickets.unwrap_or_else(|err| {
-        warnings.push(format!("Jira: {err}"));
-        HashMap::new()
+        let cached = fallback.as_mut().map(|c| std::mem::take(&mut c.tickets));
+        warnings.push(format!("Jira: {err}{}", if cached.is_some() { " — showing cached" } else { "" }));
+        cached.unwrap_or_default()
     });
     let mrs = mrs.unwrap_or_else(|err| {
-        warnings.push(format!("GitLab: {err}"));
-        Vec::new()
+        let cached = fallback.as_mut().map(|c| std::mem::take(&mut c.mrs));
+        warnings.push(format!("GitLab: {err}{}", if cached.is_some() { " — showing cached" } else { "" }));
+        cached.unwrap_or_default()
     });
+    if complete {
+        RemoteCache::save(&tickets, &mrs);
+    }
 
     let roots = worktree_roots(config);
     let sessions = load_sessions(&roots, &trees, &tasks);
 
     for tree in &mut trees {
-        // the pane's cwd, or where the agent's claude session last worked: agents
-        // started in the main checkout move into worktrees
-        let here: Vec<&herdr::Agent> = agents
-            .iter()
-            .filter(|a| {
-                let last_cwd = a
-                    .session_id()
-                    .and_then(|id| sessions.get(id))
-                    .and_then(|s| s.last_cwd.as_deref());
-                match last_cwd {
-                    Some(cwd) => Path::new(cwd).starts_with(&tree.wt.path),
-                    None => a.runs_in(&tree.wt.path),
-                }
-            })
-            .collect();
+        let here = agents_in(&tree.wt.path, &agents, &sessions);
         tree.agents = here.iter().map(|a| a.label()).collect();
         tree.spaces = here.iter().map(|a| a.workspace_id.clone()).collect();
         let branch = tree.wt.branch.as_deref();
@@ -702,6 +748,7 @@ fn fetch_mrs(config: &Config) -> Result<Vec<Mr>, String> {
 
     let mut mrs = Vec::new();
     for project in projects {
+        let mut found: Vec<Mr> = Vec::new();
         for mr in my_merge_requests(&config.gitlab.host, &token, project, MR_LOOKBACK_DAYS)? {
             let mut keys = ticket_keys(mr.source_branch());
             for key in ticket_keys(mr.title()) {
@@ -709,8 +756,28 @@ fn fetch_mrs(config: &Config) -> Result<Vec<Mr>, String> {
                     keys.push(key);
                 }
             }
-            mrs.push(Mr { mr, keys });
+            found.push(Mr {
+                mr,
+                keys,
+                review: None,
+            });
         }
+        // review state of the open ones, all at once
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = found
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.opened())
+                .map(|(i, m)| {
+                    let (host, token, iid) = (&config.gitlab.host, &token, m.mr.iid());
+                    (i, scope.spawn(move || mr_review(host, token, project, iid)))
+                })
+                .collect();
+            for (i, handle) in handles {
+                found[i].review = handle.join().ok().and_then(Result::ok);
+            }
+        });
+        mrs.extend(found);
     }
     Ok(mrs)
 }
@@ -750,6 +817,9 @@ fn inspect_tree(repo: PathBuf, wt: Worktree, with_status: bool) -> Tree {
         })
         .flatten();
     let keys = wt.branch.as_deref().map(ticket_keys).unwrap_or_default();
+    let last_commit = with_status
+        .then(|| worktree::last_commit_time(&wt.path).ok())
+        .flatten();
     Tree {
         repo,
         wt,
@@ -760,7 +830,30 @@ fn inspect_tree(repo: PathBuf, wt: Worktree, with_status: bool) -> Tree {
         spaces: Vec::new(),
         mr: None,
         finished: false,
+        last_commit,
     }
+}
+
+/// Agents working in `dir`: where their claude session last worked, else the
+/// pane's cwd — agents started in the main checkout move into worktrees.
+fn agents_in<'a>(
+    dir: &Path,
+    agents: &'a [herdr::Agent],
+    sessions: &HashMap<String, sessions::Session>,
+) -> Vec<&'a herdr::Agent> {
+    agents
+        .iter()
+        .filter(|a| {
+            let last_cwd = a
+                .session_id()
+                .and_then(|id| sessions.get(id))
+                .and_then(|s| s.last_cwd.as_deref());
+            match last_cwd {
+                Some(cwd) => Path::new(cwd).starts_with(dir),
+                None => a.runs_in(dir),
+            }
+        })
+        .collect()
 }
 
 fn live_herdr() -> (Vec<herdr::Agent>, Vec<herdr::Workspace>) {
@@ -774,6 +867,18 @@ fn live_herdr() -> (Vec<herdr::Agent>, Vec<herdr::Workspace>) {
 }
 
 impl Table {
+    /// Fresh agent states without rebuilding: herdr answers in milliseconds, so
+    /// the TUI polls it far more often than Jira and GitLab. Worktrees keep their
+    /// task; only who works in them and how changes.
+    pub fn update_agents(&mut self, agents: &[herdr::Agent]) {
+        for tree in &mut self.trees {
+            tree.agents = agents_in(&tree.wt.path, agents, &self.sessions)
+                .iter()
+                .map(|a| a.label())
+                .collect();
+        }
+    }
+
     pub fn tree(&self, i: usize) -> &Tree {
         &self.trees[i]
     }

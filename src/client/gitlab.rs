@@ -156,14 +156,81 @@ pub fn my_merge_requests(
     Ok(mrs)
 }
 
-#[derive(Debug, serde::Deserialize)]
+/// Review state of an open MR: three more requests, so only for open ones.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MrReview {
+    /// Head pipeline status: "running", "success", "failed", "pending"…
+    pub pipeline: Option<String>,
+    pub approved_by: Vec<String>,
+    /// Resolvable discussions not resolved yet.
+    pub unresolved: usize,
+}
+
+pub fn mr_review(host: &str, token: &str, project: &str, iid: u64) -> std::result::Result<MrReview, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let base = format!(
+        "https://{host}/api/v4/projects/{}/merge_requests/{iid}",
+        urlencoding::encode(project)
+    );
+    let get = |path: &str| -> std::result::Result<serde_json::Value, String> {
+        client
+            .get(format!("{base}{path}"))
+            .header("PRIVATE-TOKEN", token)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.json())
+            .map_err(|e| e.to_string())
+    };
+    let (mr, approvals, discussions) = std::thread::scope(|scope| {
+        let approvals = scope.spawn(|| get("/approvals"));
+        let discussions = scope.spawn(|| get("/discussions?per_page=100"));
+        (get(""), approvals.join().unwrap(), discussions.join().unwrap())
+    });
+    let pipeline = mr?
+        .pointer("/head_pipeline/status")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let approved_by = approvals?
+        .get("approved_by")
+        .and_then(|v| v.as_array())
+        .map(|users| {
+            users
+                .iter()
+                .filter_map(|u| u.pointer("/user/username").and_then(|n| n.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let unresolved = discussions?
+        .as_array()
+        .map(|threads| {
+            threads
+                .iter()
+                .filter(|d| {
+                    d.pointer("/notes/0/resolvable").and_then(|v| v.as_bool()) == Some(true)
+                        && d.pointer("/notes/0/resolved").and_then(|v| v.as_bool()) == Some(false)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    Ok(MrReview {
+        pipeline,
+        approved_by,
+        unresolved,
+    })
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct User {
     id: u64,
     username: String,
     name: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MergeRequest {
     iid: u64,
     title: String,
@@ -172,6 +239,14 @@ pub struct MergeRequest {
     web_url: String,
     source_branch: String,
     sha: Option<String>,
+    /// GitLab's verdict on what blocks the merge: "mergeable", "ci_still_running",
+    /// "ci_must_pass", "discussions_not_resolved", "not_approved", "conflict"…
+    #[serde(default)]
+    pub detailed_merge_status: Option<String>,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 impl MergeRequest {

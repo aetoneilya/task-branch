@@ -45,9 +45,21 @@ pub struct Agent {
     pub cwd: Option<String>,
     pub pane_id: String,
     pub tab_id: String,
+    pub workspace_id: String,
+    pub agent_session: Option<AgentSession>,
+}
+
+/// The agent's own session handle; for claude, the session id.
+#[derive(Debug, Deserialize)]
+pub struct AgentSession {
+    pub value: String,
 }
 
 impl Agent {
+    pub fn session_id(&self) -> Option<&str> {
+        self.agent_session.as_ref().map(|s| s.value.as_str())
+    }
+
     pub fn label(&self) -> String {
         let name = self.name.as_deref().unwrap_or(&self.pane_id);
         format!("{}:{}", name, self.agent_status)
@@ -105,8 +117,8 @@ pub fn split_pane(pane: &str, direction: &str, cwd: &Path) -> Result<String> {
     result_field(response, "/result/pane/pane_id")
 }
 
-/// Opens a tab in `workspace` without moving focus and returns its root pane id.
-pub fn create_tab(workspace: &str, cwd: &Path, label: &str) -> Result<String> {
+/// Opens a tab in `workspace` without moving focus; returns its id and root pane id.
+pub fn create_tab(workspace: &str, cwd: &Path, label: &str) -> Result<(String, String)> {
     let cwd = cwd.to_string_lossy();
     let response = run_herdr(&[
         "tab",
@@ -119,11 +131,94 @@ pub fn create_tab(workspace: &str, cwd: &Path, label: &str) -> Result<String> {
         label,
         "--no-focus",
     ])?;
-    result_field(response, "/result/root_pane/pane_id")
+    Ok((
+        result_field(response.clone(), "/result/tab/tab_id")?,
+        result_field(response, "/result/root_pane/pane_id")?,
+    ))
+}
+
+/// A new workspace without moving focus; returns its id, root tab id and root pane id.
+pub fn create_workspace(label: &str, cwd: &Path) -> Result<(String, String, String)> {
+    let cwd = cwd.to_string_lossy();
+    let response = run_herdr(&[
+        "workspace",
+        "create",
+        "--cwd",
+        &cwd,
+        "--label",
+        label,
+        "--no-focus",
+    ])?;
+    Ok((
+        result_field(response.clone(), "/result/workspace/workspace_id")?,
+        result_field(response.clone(), "/result/tab/tab_id")?,
+        result_field(response, "/result/root_pane/pane_id")?,
+    ))
+}
+
+/// Types `command` and Enter into the shell of `pane`.
+pub fn run_in_pane(pane: &str, command: &str) -> Result<()> {
+    let output = Command::new("herdr")
+        .args(["pane", "run", pane, command])
+        .output()?;
+    if !output.status.success() {
+        return Err(HerdrError::NonZeroExit(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Names the agent `pane` will host once herdr detects it, in the background:
+/// claude started by a plain command in the pane is detected a moment later.
+pub fn name_agent_when_up(pane: &str, name: &str) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    Command::new("sh")
+        .args([
+            "-c",
+            r#"i=0; while [ $i -lt 120 ]; do herdr agent rename "$0" "$1" >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 0.5; done"#,
+            pane,
+            name,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    Ok(())
+}
+
+pub fn rename_tab(tab: &str, label: &str) -> Result<()> {
+    run_herdr(&["tab", "rename", tab, label]).map(|_| ())
+}
+
+pub fn focus_tab(tab: &str) -> Result<()> {
+    run_herdr(&["tab", "focus", tab]).map(|_| ())
+}
+
+/// Switches to the agent: its workspace, its tab, then its pane — `agent focus`
+/// alone only makes the pane active inside a tab that may not be on screen.
+/// Accepts an agent name or the pane id hosting it.
+pub fn focus_agent(target: &str) -> Result<()> {
+    let info = run_herdr(&["agent", "get", target])?;
+    let field = |name: &str| {
+        info.pointer(&format!("/result/agent/{name}"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    if let Some(workspace) = field("workspace_id") {
+        run_herdr(&["workspace", "focus", &workspace])?;
+    }
+    if let Some(tab) = field("tab_id") {
+        run_herdr(&["tab", "focus", &tab])?;
+    }
+    run_herdr(&["agent", "focus", target]).map(|_| ())
 }
 
 /// Starts claude in `pane`. An agent blocked by a startup dialog (folder trust)
 /// still counts as started: its initial prompt runs once the dialog is answered.
+/// So does a startup timeout: with an initial prompt claude goes straight to work
+/// and never shows the idle prompt herdr waits for — it is only left unnamed.
 pub fn start_claude(name: &str, pane: &str, claude_args: &[&str]) -> Result<()> {
     let mut args = vec!["agent", "start", name, "--kind", "claude", "--pane", pane];
     if !claude_args.is_empty() {
@@ -132,6 +227,9 @@ pub fn start_claude(name: &str, pane: &str, claude_args: &[&str]) -> Result<()> 
     }
     match run_herdr(&args) {
         Err(HerdrError::NonZeroExit(message)) if message.contains("agent_not_ready") => Ok(()),
+        Err(HerdrError::NonZeroExit(message)) if message.contains("\"timeout\"") => {
+            run_herdr(&["agent", "rename", pane, name]).map(|_| ())
+        }
         other => other.map(|_| ()),
     }
 }

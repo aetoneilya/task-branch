@@ -1,4 +1,7 @@
+mod progress;
+mod table;
 mod tasks;
+mod work;
 
 use crate::client::git::key_from_branch_name;
 use crate::client::gitlab::MergeRequest;
@@ -14,10 +17,12 @@ use std::path::PathBuf;
 use std::{fmt, io};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(name = "wt", author, version, long_about = None)]
+/// Tasks, Jira tickets, merge requests and worktrees in one table
 pub struct Cli {
+    /// Without a command: the TUI
     #[command(subcommand)]
-    command: CliCommands,
+    command: Option<CliCommands>,
 
     #[arg(long = "repo", short = 'r', default_value = ".", global = true)]
     repo_path: PathBuf,
@@ -49,32 +54,92 @@ enum CliCommands {
         #[arg(long, short = 'k')]
         key: String,
     },
+    /// The TUI, as `wt` without a command
     Tui {},
 
-    /// Start a task: worktree, herdr workspace and a claude agent briefed from the Jira issue
+    /// Start new work. `wt start "<task name>"`: a task note, its herdr workspace
+    /// and a worktree tab with claude briefed from the note and the first ticket.
+    /// `wt start UCP-123`: the same, the task named after the ticket's summary
     Start {
-        #[arg(long, short = 'k')]
-        key: Option<String>,
-        /// Worktree, workspace and agent name
+        /// Task name or ticket key; a picker when omitted
+        target: Option<String>,
+        /// Tickets of the new task, the first one gets the worktree
+        #[arg(long = "ticket", short = 'k')]
+        tickets: Vec<String>,
+        #[arg(long = "tag", short = 't')]
+        tags: Vec<String>,
+        /// The goal: first line of the note and the agent's brief
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+        /// Worktree, tab and agent name; default: from the ticket summary
         #[arg(long, short = 'n')]
         name: Option<String>,
         /// Default: <branch_prefix><KEY>-<name>
         #[arg(long, short = 'b')]
         branch: Option<String>,
-        /// What the agent should do, on top of the issue text
-        #[arg(long, short = 'm')]
-        message: Option<String>,
-        /// Open as a tab in the current workspace
-        #[arg(long)]
-        tab: bool,
-        /// Don't switch focus to the new workspace
+        /// Don't switch to the new tab
         #[arg(long)]
         bg: bool,
     },
-    /// Task worktrees with local changes, agents and merge requests
-    Status {},
+    /// Add a ticket to a task, with its own worktree tab in the task's workspace
+    Add {
+        /// [<task>] <KEY>; the task defaults to the current one
+        #[arg(num_args = 1..=2, required = true)]
+        args: Vec<String>,
+        /// Run the agent in this existing worktree of the task (stacked MRs)
+        #[arg(long = "in")]
+        in_tree: Option<String>,
+        #[arg(long, short = 'n')]
+        name: Option<String>,
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+        #[arg(long)]
+        bg: bool,
+    },
+    /// Go back to a task: its agent, or claude resuming the last session there
+    Select {
+        /// Task name or ticket key; a picker when omitted
+        target: Option<String>,
+        /// That worktree of the task
+        #[arg(long)]
+        tree: Option<String>,
+        /// Pick which of the task's sessions to resume
+        #[arg(long)]
+        session: bool,
+        /// Don't switch to it
+        #[arg(long)]
+        bg: bool,
+    },
+    /// (internal) Run in a new tab by start/add: create the worktree, then claude
+    #[command(hide = true)]
+    Prepare { spec: PathBuf },
+    /// (for agents) Append a finding to the task note's "Agent notes"
+    Note {
+        #[arg(trailing_var_arg = true, required = true)]
+        text: Vec<String>,
+    },
+    /// Tasks with their tickets, merge requests, worktrees and agents; then work
+    /// that belongs to no task. Updates `state` and `sessions` in task notes.
+    Status {
+        /// Only tasks with this tag
+        #[arg(long, short = 't')]
+        tag: Option<String>,
+        /// Also done tasks
+        #[arg(long, short = 'a')]
+        all: bool,
+        /// Don't update task notes
+        #[arg(long)]
+        no_write: bool,
+    },
+    /// Add `tickets:` to task notes made before worktable (dry run by default)
+    Migrate {
+        #[arg(long)]
+        apply: bool,
+    },
     /// Start a reviewer agent next to the task's agent
-    Review { name: Option<String> },
+    Review {
+        name: Option<String>,
+    },
     /// Remove a finished task: worktree, branch and herdr workspace
     Done {
         name: Option<String>,
@@ -104,12 +169,54 @@ enum ListOption {
 pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let config = load_config().map_err(|err| err.to_string())?;
+    let command = match cli.command {
+        None | Some(CliCommands::Tui {}) => return crate::tui::run(config),
+        Some(command) => command,
+    };
+    match command {
+        CliCommands::Status { tag, all, no_write } => {
+            return table::cli_status(&config, tag, all, no_write);
+        }
+        CliCommands::Migrate { apply } => return table::cli_migrate(&config, apply),
+        CliCommands::Start {
+            target,
+            tickets,
+            tags,
+            message,
+            name,
+            branch,
+            bg,
+        } => return work::cli_start(&config, target, tickets, tags, message, name, branch, bg),
+        CliCommands::Add {
+            args,
+            in_tree,
+            name,
+            message,
+            bg,
+        } => return work::cli_add(&config, args, in_tree, name, message, bg),
+        CliCommands::Select {
+            target,
+            tree,
+            session,
+            bg,
+        } => {
+            return work::cli_select(&config, target, tree, session, bg);
+        }
+        CliCommands::Note { text } => return work::cli_note(&config, text),
+        CliCommands::Prepare { spec } => return work::cli_prepare(&spec),
+        _ => {}
+    }
+    let (repo_path, project) = work::legacy_repo(&config, &cli.repo_path);
+    let mut gitlab = config.gitlab;
+    if let Some(project) = project {
+        gitlab.project = project;
+    }
     let workflow = config.workflow;
 
-    let state = JiraGitlabState::new(cli.repo_path, config.jira, config.gitlab)
+    let state = JiraGitlabState::new(repo_path, config.jira, gitlab)
         .map_err(|err| err.to_string())?;
 
-    match cli.command {
+    match command {
         CliCommands::List { list_option } => cli_list(&state, list_option)?,
         CliCommands::NewTask { key } => cli_new_task(&state, key)?,
         CliCommands::Mr {
@@ -119,16 +226,14 @@ pub fn run() -> Result<(), String> {
         } => cli_create_mr(&state, key, title, description)?,
         CliCommands::Switch { key } => select_mr(&state, key)?,
         CliCommands::Info { key } => cli_info(&state, key)?,
-        CliCommands::Tui {} => cli_tui(&state)?,
-        CliCommands::Start {
-            key,
-            name,
-            branch,
-            message,
-            tab,
-            bg,
-        } => tasks::cli_start(&state, &workflow, key, name, branch, message, tab, bg)?,
-        CliCommands::Status {} => tasks::cli_status(&state)?,
+        CliCommands::Tui {} => unreachable!(),
+        CliCommands::Status { .. }
+        | CliCommands::Migrate { .. }
+        | CliCommands::Start { .. }
+        | CliCommands::Add { .. }
+        | CliCommands::Select { .. }
+        | CliCommands::Note { .. }
+        | CliCommands::Prepare { .. } => unreachable!(),
         CliCommands::Review { name } => tasks::cli_review(&state, &workflow, name)?,
         CliCommands::Done {
             name,
@@ -279,10 +384,6 @@ fn cli_create_mr(
 
     println!("Created merge request: {}", display_mr(&mr, true));
     Ok(())
-}
-
-fn cli_tui(state: &JiraGitlabState) -> Result<(), String> {
-    crate::tui::run(state)
 }
 
 fn cli_list(state: &JiraGitlabState, list_option: Option<ListOption>) -> Result<(), String> {

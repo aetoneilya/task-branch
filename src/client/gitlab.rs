@@ -73,6 +73,7 @@ impl GitLabClient {
             .collect())
     }
 
+    /// My merge requests: every open one, plus any updated in the last `days` days.
     /// Merge requests of any state and author opened from `branch`, newest first.
     pub fn find_merge_requests_by_branch(&self, branch: &str) -> Result<Vec<MergeRequest>> {
         let endpoint = MergeRequests::builder()
@@ -101,6 +102,58 @@ impl GitLabClient {
         let mr: MergeRequest = endpoint.query(&self.client)?;
         Ok(mr)
     }
+}
+
+/// My merge requests in `project`: all opened, plus any updated in the last
+/// `days` days. Plain REST with `scope=created_by_me`, both lists at once: the
+/// gitlab crate spends two requests on the token check and the current user first.
+pub fn my_merge_requests(
+    host: &str,
+    token: &str,
+    project: &str,
+    days: i64,
+) -> std::result::Result<Vec<MergeRequest>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let base = format!(
+        "https://{host}/api/v4/projects/{}/merge_requests?scope=created_by_me&per_page=100",
+        urlencoding::encode(project)
+    );
+    let since = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+    let get_pages = |query: String, max_pages: u32| {
+        let mut mrs: Vec<MergeRequest> = Vec::new();
+        for page in 1..=max_pages {
+            let response = client
+                .get(format!("{base}&{query}&page={page}"))
+                .header("PRIVATE-TOKEN", token)
+                .send()
+                .and_then(|r| r.error_for_status())
+                .map_err(|e| e.to_string())?;
+            let last = response
+                .headers()
+                .get("x-next-page")
+                .is_none_or(|v| v.is_empty());
+            mrs.extend(response.json::<Vec<MergeRequest>>().map_err(|e| e.to_string())?);
+            if last {
+                break;
+            }
+        }
+        Ok::<_, String>(mrs)
+    };
+    let (opened, recent) = std::thread::scope(|scope| {
+        let opened = scope.spawn(|| get_pages("state=opened".to_string(), 10));
+        let recent = get_pages(format!("updated_after={}", urlencoding::encode(&since)), 3);
+        (opened.join().unwrap(), recent)
+    });
+    let mut mrs = opened?;
+    for mr in recent? {
+        if !mrs.iter().any(|m| m.iid == mr.iid) {
+            mrs.push(mr);
+        }
+    }
+    Ok(mrs)
 }
 
 #[derive(Debug, serde::Deserialize)]

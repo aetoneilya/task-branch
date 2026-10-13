@@ -72,7 +72,6 @@ claude agent in a [herdr](https://herdr.dev) workspace. They rely on the `wt` sc
 # ~/.config/jg/config.toml
 [workflow]
 branch_prefix = "i.udalov/"   # new branches: <prefix><KEY>-<name>
-max_agents = 4                # start asks for confirmation above this
 # review_model = "claude-fable-5-1"
 ```
 

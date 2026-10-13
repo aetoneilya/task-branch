@@ -19,7 +19,7 @@ the Obsidian vault joined into one table, shown in Obsidian and in a TUI.
 
 ```
 task  (note: shared context; any size — a "project" is just a big task)
- ├─ tickets    UCP-61083, UCP-61084        manual: the only link the user sets
+ ├─ tickets    UCP-61083, UCP-61084        manual, plus keys found on the task's worktrees/MRs
  ├─ MRs        !16428 !16266 !16170        auto: ticket key in source branch or title
  ├─ branches   i.udalov/UCP-61083-…        auto: from MRs and local refs with the key
  ├─ worktrees  a2i-config                  auto: worktree whose branch is one of the above
@@ -29,8 +29,15 @@ task  (note: shared context; any size — a "project" is just a big task)
 
 - **Task** — a markdown note in one of the task folders. Its body is the shared
   context: goal, decisions, constraints, plan, findings.
+- **One task = one herdr workspace** (decided 2026-10-09), labelled with the
+  task name; each worktree of the task is a tab in it, with its agent. A
+  worktree belongs to a task by its branch's ticket key, or because an agent in
+  the task's workspace works in it — so a branch without a key (a quick fix
+  spun off during the task) still lands in the task.
 - **Ticket → task** is set explicitly (`wt add`, `wt start <name> -k`, or by
-  editing `tickets:`). Everything below it is derived on every sync.
+  editing `tickets:`), and by sync: a key on a worktree or MR that belongs to the
+  task (through its herdr workspace or a worktree's branch) and that no note
+  lists yet is added to the task's `tickets:`. Everything else is derived.
 - **Nesting** is optional: `parent: "[[единый образ]]"`.
 - **Tags** — plain Obsidian `tags:`; used for filtering and "similar tasks".
 - **Loose ends** — anything not reachable from a task: my in-progress tickets with
@@ -44,7 +51,8 @@ task  (note: shared context; any size — a "project" is just a big task)
 | ticket | MR | `\b<KEY>\b` in MR source branch or title |
 | ticket | branch | `\b<KEY>\b` in a local or remote branch name |
 | branch | worktree | `git worktree list --porcelain` |
-| worktree | agent | herdr `agent list`, agent `cwd` under the worktree path |
+| worktree | agent | herdr `agent list`: the last `cwd` in the agent's claude transcript (agents started in the main checkout move into worktrees), else the pane cwd |
+| worktree | task | an agent working in it runs in the task's herdr workspace (label == task name) |
 | MR | MR (no key) | worktree's branch == MR source branch (MRs without a key still land in their worktree's task) |
 
 A ticket listed in two tasks is a conflict: shown in both, flagged in loose ends.
@@ -69,7 +77,7 @@ task notes are not edited on the phone. So notes carry almost no live data.
 
 ```yaml
 ---
-# user-owned (worktable only writes these on an explicit command)
+# user-owned (worktable writes these on a command; sync only appends to tickets)
 tickets: [UCP-61083, UCP-61084]
 tags: [a2i, selectors, cache]
 parent: "[[единый образ]]"
@@ -105,9 +113,10 @@ closed: 2026-11-02
 
 ### Agent context
 
-The note body is the agent's brief, replacing `.git/worktrees/<name>/task.md`.
-`wt start` prompts the agent with: the note path, the Jira summaries/descriptions of
-the task's tickets (fetched at start), the definition of done.
+`wt start` / `wt add` write a brief to `.git/worktrees/<name>/task.md`: the note
+path, the Jira description of the ticket, the definition of done. The agent's
+initial prompt only points at the note and the brief and tells it to read them
+and wait (decided 2026-10-13): the work starts with analysis, on my command.
 
 Agents write their findings into the note, but only under the `## Agent notes`
 heading (decided 2026-10-09); everything above it is the user's. They do it via
@@ -130,8 +139,12 @@ and can be resumed later, also after the worktree was removed.
   `~/.claude/projects/<cwd with / and . → ->/<session-id>.jsonl`, keyed by the
   directory claude ran in; they survive `git worktree remove`. herdr also reports
   the live session per agent (`agent list` → `agent_session.value`).
-- **Discovery.** On sync, for every worktree path the task ever had, list
-  `<slug>/*.jsonl` and add new ids to `sessions`. The key is append-only: removing
+- **Discovery.** Transcripts live under the directory claude was *launched*
+  in, often the main checkout, while the work happens in a worktree. So the
+  transcripts of the main checkouts and of every worktree are parsed (cached by
+  size + mtime in `~/.cache/worktable/sessions.json`), and a session belongs to a
+  task when its records' `cwd` fall into one of the task's worktrees; new ids are
+  added to `sessions`. The key is append-only: removing
   a worktree drops it from `worktrees`, never from `sessions`, so the path is
   remembered through the session entry. Sessions started elsewhere (main checkout,
   the vault) are attached by hand: `wt attach-session <id> <task>`.
@@ -173,22 +186,30 @@ wt status                   the table in plain text
 
 ### `wt start <task name | KEY> [-k KEY]... [-t tag]... [-m text] [-n name] [--tab] [--bg]`
 
-- **A ticket key** (`UCP-12345`) — work on a ticket without a note. Worktree and
-  branch `<prefix><KEY>-<slug from summary>`, herdr workspace, claude briefed from
-  the Jira issue. The ticket shows in loose ends until `wt add` puts it into a task.
-  If the ticket already belongs to a task, this is `wt add <that task> <KEY>`.
+- **A ticket key** (`UCP-12345`) — a new task named after the ticket's summary
+  (characters a file name can't hold dropped), with that ticket: the same as
+  `wt start "<summary>" -k UCP-12345`. Work never runs without a task — the note
+  is where the context and agents' findings go. If the ticket already belongs to
+  a task, this is `wt add <that task> <KEY>`.
 - **A name** — a new task: creates the note `<new_task_dir>/<name>.md` (`-k`
-  tickets, `-t` tags, `-m` goal as the first body line), then worktree, workspace
-  and claude briefed from the note. If a task with that name exists, it says so
+  tickets, `-t` tags, `-m` goal as the first body line), the herdr workspace
+  labelled `<name>`, then a worktree as a tab in it with claude briefed from the
+  note. Never `herdr worktree open`: it files the workspace under the repo group. If a task with that name exists, it says so
   and suggests `wt select` / `wt add`. Before creating, lists tasks with similar
   tags/title and asks whether one of them was meant.
 - **No argument** — fuzzy picker over my open Jira tickets not in any task, plus
   "new task…".
 
+`wt start` and `wt add` return at once: fetch and checkout of ucp take ~30 s, so
+the new tab runs the hidden `wt prepare <spec>` — step lines with a spinner and
+git's own checkout progress, then the brief, then it execs claude in the worktree
+(named in the background once herdr detects it).
+
 ### `wt add [<task>] <KEY> [--in <worktree>] [-n name] [--tab] [--bg]`
 
-Attaches the ticket to the task (writes `tickets:`) and opens a workspace for it:
-a new worktree by default, or `--in` an existing worktree of the task (stacked
+Attaches the ticket to the task (writes `tickets:`) and opens a tab for it in
+the task's herdr workspace (creating the workspace if it is gone): a new worktree
+by default, or `--in` an existing worktree of the task (stacked
 MRs that share one worktree) — then only a new agent in that worktree. The agent
 is briefed with the task note plus the ticket. `<task>` defaults to the task of
 the current worktree, otherwise a fuzzy picker.
@@ -199,8 +220,9 @@ Returns to existing work; without an argument a fuzzy picker over open tasks and
 note-less tickets with worktrees, most recently active first. Then, for the
 chosen work's worktree (picker if the task has several):
 
-1. a live agent → focus its herdr workspace;
-2. worktree exists, no agent → herdr workspace there + `claude --continue`
+1. a live agent → focus its tab in the task's herdr workspace;
+2. worktree exists, no agent → a tab in the task's workspace (created if gone)
+   + `claude --continue`
    (`--session` picks one of the task's sessions → `claude --resume <id>`);
 3. worktree removed, branch still exists locally or on origin → recreate the
    worktree at the same path (sessions are keyed by directory), then as 2;
@@ -236,52 +258,41 @@ only by `wt ticket new`.
 
 ## TUI
 
-One screen: task tree on the left, details of the selection on the right.
-Cached state renders instantly; refresh runs in background threads and updates
-rows in place.
+`wt` (or `wt tui`): the task tree on the left, details of the selection on the
+right. The offline table (notes, worktrees, agents) renders at once; a background
+refresh fills in Jira and GitLab, writes task states and sessions back like
+`wt status`, and repeats every minute.
 
-```
-┌ worktable ─ Tasks │ Loose ends 3 │ Review 2 ───────────────── synced 10:40 ⟳ ┐
-│ / filter   # a2i                                                            │
-├────────────────────────────────────────┬───────────────────────────────────┤
-│ ● a2i selectors              active    │ a2i selectors                      │
-│   ├ UCP-61083  В работе                │ #a2i #selectors  ↑ единый образ    │
-│   │  ├ !16428 opened  ✓pipe  1/2 appr  │                                    │
-│   │  ├ !16266 opened  ✗pipe            │ ## Цель                            │
-│   │  └ !16170 merged                   │ Селекторы по 3-уровневой модели:   │
-│   ├ UCP-61084  Новый                   │ фабрика → кеш → привязка к запросу │
-│   │  └ !16117 opened  ✓pipe            │ …                                  │
-│   └ ⌂ a2i-config  2 changed  1 unpushed│                                    │
-│       ◉ a2i-config  working            │ ## Agent notes                     │
-│ ○ s2i cache                  review    │ - кеш ключуется по версии конфига  │
-│ ✓ fp selectors               finished  │                                    │
-├────────────────────────────────────────┴───────────────────────────────────┤
-│ ⏎ go  o note  e edit  m MR  j jira  s start  R review  d done  a attach  ?  │
-└────────────────────────────────────────────────────────────────────────────┘
-```
-
-- **Tabs**: Tasks · Loose ends (count) · Review (MRs where I am a reviewer, phase 4).
-- **Rows**: task → tickets → MRs; worktrees and agents under the task.
-  `space` folds; done tasks hidden unless `.` toggles them.
-- **Filter**: `/` text over title, tickets, branches; `#` tag.
-- **Details pane** follows the selected row: note body for a task, ticket
-  description for a ticket, MR (pipeline, approvals, discussions count) for an MR,
-  `git status` + unpushed log for a worktree, last agent output for an agent.
+- **Rows**: task → its tickets → MRs without a worktree; the task's worktrees →
+  the MR of their branch, agents. Tasks go by state (active, review, idea,
+  finished), newest first by when the note entered the vault's git history.
+  Below a `no task` title: tickets without a task that have a worktree or an open
+  MR, and worktrees without a ticket. Below `assigned to me in Jira`: my open
+  tickets nothing is done on yet, in progress first. `.` adds done tasks, merged
+  MRs, finished worktrees.
+- **Filter**: `/` over task names, tags, tickets and summaries, branches.
+- **Details** follow the selection: the note body for a task, the Jira
+  description for a ticket, the MR, `git status` + unpushed and branch commits for
+  a worktree, the agent's last screen for an agent — slow parts load in threads.
 
 | key | on | action |
 |---|---|---|
-| `⏎` | worktree / agent | `herdr agent focus` / `workspace focus` (TUI stays) |
-| `o` / `e` | any | note in Obsidian / in `$EDITOR` |
-| `m`, `j` | MR, ticket | open in browser |
-| `s` | task, ticket | `wt start` (asks name, prefilled) |
-| `R` | worktree | `wt review` |
-| `c` | task, worktree | `wt select --session` (pick from its sessions, newest first) |
-| `d` | task, worktree | `wt done` with confirmation listing what goes |
-| `a` | loose end | attach to task (fuzzy picker) or `n` new task from it |
-| `t` | task | edit tags |
-| `r` | — | refresh now |
+| `⏎` | agent / worktree | focus the agent; a worktree without one: `wt select <task> --tree <name>` (resume or fresh claude) |
+| `⏎` | task, ticket | `wt select` |
+| `b` | ticket, MR, worktree | open in the browser |
+| `o` / `e` | anything under a task | note in Obsidian / in `$EDITOR` |
+| `s` | ticket / task | `wt start KEY` / asks a key for `wt add` |
+| `n` | — | asks a name for `wt start` |
+| `c` | task, ticket | `wt select --session` |
+| `R`, `d` | worktree | `wt review`, `wt done` |
+| `space` `h` `l` | — | fold, fold / to parent, unfold |
+| `r`, `?`, `q` | — | refresh, keys, quit |
 
-Destructive actions always show the list of what will be removed and wait for `y`.
+Commands that may ask (pickers, confirmations) get the terminal and return on ⏎;
+`wt done` keeps its own confirmation listing what goes.
+
+Not yet: Review tab, attaching a loose ticket to a task without a worktree,
+editing tags.
 
 ## Config
 
@@ -302,7 +313,6 @@ gitlab_project = "ai/ucp"
 
 [workflow]
 branch_prefix = "i.udalov/"
-max_agents = 4
 review_model = "claude-fable-5-1"
 done_definition = "…"
 ```

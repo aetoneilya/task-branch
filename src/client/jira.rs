@@ -20,11 +20,18 @@ pub enum JiraError {
     #[error("failed during request execution: {0}")]
     RequestExecutionError(#[from] reqwest::Error),
 
-    #[error("git command exited with status {0}")]
+    #[error("Jira answered {0}")]
     RequestResultError(StatusCode, String),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, JiraError>;
+
+impl JiraError {
+    /// Jira refused the query itself (400), e.g. a `key in (…)` with an unknown key.
+    pub fn bad_request(&self) -> bool {
+        matches!(self, JiraError::RequestResultError(status, _) if *status == StatusCode::BAD_REQUEST)
+    }
+}
 
 impl JiraClient {
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
@@ -68,6 +75,18 @@ impl JiraClient {
         self.get_json(&url)
     }
 
+    /// Search returning only the fields `JiraIssue` needs, up to `max` issues.
+    pub fn search_issues_brief(&self, jql: &str, max: usize) -> Result<Vec<JiraIssue>> {
+        let url = format!(
+            "{}/rest/api/2/search?jql={}&maxResults={}&fields=summary,status,created,updated,assignee",
+            self.base_url,
+            urlencoding::encode(jql),
+            max
+        );
+        let result: JiraSearchResult = self.get_json(&url)?;
+        Ok(result.issues)
+    }
+
     pub fn search_issues(&self, jql: &str) -> Result<Vec<JiraIssue>> {
         let encoded_jql = urlencoding::encode(jql);
         let url = format!("{}/rest/api/2/search?jql={}", self.base_url, encoded_jql);
@@ -92,6 +111,15 @@ pub struct JiraIssue {
 }
 
 impl JiraIssue {
+    pub fn status_category(&self) -> &str {
+        self.fields
+            .status
+            .as_ref()
+            .and_then(|s| s.status_category.as_ref())
+            .map(|c| c.key.as_str())
+            .unwrap_or("")
+    }
+
     pub fn status(&self) -> &str {
         self.fields
             .status
@@ -142,6 +170,14 @@ pub struct Status {
     pub description: String,
     pub name: String,
     pub id: String,
+    #[serde(rename = "statusCategory")]
+    pub status_category: Option<StatusCategory>,
+}
+
+/// Jira's coarse status: "new", "indeterminate" (in progress) or "done".
+#[derive(Debug, Deserialize)]
+pub struct StatusCategory {
+    pub key: String,
 }
 
 #[derive(Debug, Deserialize)]

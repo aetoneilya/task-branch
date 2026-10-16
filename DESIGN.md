@@ -289,8 +289,8 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
   MR, and worktrees without a ticket. Below `assigned to me in Jira`: my open
   tickets nothing is done on yet, in progress first. `.` adds done tasks, merged
   MRs, finished worktrees.
-- **Hide**: `v` toggles tasks, tickets under tasks, MRs, worktrees, agents and
-  each section out of the tree; the choice is kept in `tui.json` in the cache.
+- **Hide**: `v` toggles tickets under tasks, MRs, worktrees and agents out of
+  the tree; the choice is kept in `tui.json` in the cache.
   With agents hidden, `w` goes to their worktrees.
 - **Filter**: `/` over task names, tags, tickets and summaries, branches.
 - **Details** follow the selection: the note body for a task, the Jira

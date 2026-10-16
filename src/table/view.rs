@@ -77,8 +77,6 @@ pub struct Options<'a> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hide {
-    /// Tasks and everything under them.
-    pub tasks: bool,
     /// Ticket rows under tasks: their MRs move up to the task, once each.
     pub tickets: bool,
     pub mrs: bool,
@@ -86,8 +84,6 @@ pub struct Hide {
     /// its ticket.
     pub trees: bool,
     pub agents: bool,
-    pub no_task: bool,
-    pub assigned: bool,
 }
 
 impl Hide {
@@ -105,7 +101,7 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
 
     // the table keeps tasks by state, newest first; done ones come last
     for (i, row) in table.tasks.iter().enumerate() {
-        if hide.tasks || (row.task.done && !all) {
+        if row.task.done && !all {
             continue;
         }
         if options
@@ -254,11 +250,8 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
         },
         _ => 2,
     });
-    for (section, nodes, hidden) in [
-        (Section::NoTask, no_task, hide.no_task),
-        (Section::Assigned, assigned, hide.assigned),
-    ] {
-        if !hidden && !nodes.is_empty() {
+    for (section, nodes) in [(Section::NoTask, no_task), (Section::Assigned, assigned)] {
+        if !nodes.is_empty() {
             roots.push(Node::leaf(
                 format!("header:{}", section.title()),
                 Kind::Header(section),
@@ -436,7 +429,6 @@ mod tests {
             shown(Hide {
                 mrs: true,
                 agents: true,
-                assigned: true,
                 ..Default::default()
             }),
             vec![
@@ -444,15 +436,15 @@ mod tests {
                 "  ticket:a2i:UCP-1",
                 "  tree:/a",
                 "header:no task",
-                "tree:/misc"
+                "tree:/misc",
+                "header:assigned to me in Jira",
+                "loose:UCP-5"
             ]
         );
         // without worktrees, the MR one held goes under its ticket
         assert_eq!(
             shown(Hide {
                 trees: true,
-                no_task: true,
-                assigned: true,
                 ..Default::default()
             }),
             vec![
@@ -460,18 +452,8 @@ mod tests {
                 "  ticket:a2i:UCP-1".to_string(),
                 format!("    mr:{m10}"),
                 format!("    mr:{m11}"),
-            ]
-        );
-        assert_eq!(
-            shown(Hide {
-                tasks: true,
-                ..Default::default()
-            }),
-            vec![
-                "header:no task",
-                "tree:/misc",
-                "header:assigned to me in Jira",
-                "loose:UCP-5"
+                "header:assigned to me in Jira".to_string(),
+                "loose:UCP-5".to_string(),
             ]
         );
     }

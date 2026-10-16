@@ -279,7 +279,7 @@ impl App {
             "N          add a dated line to the task note",
             "R          review worktree (wt review)  d  worktree: remove it; task: close it with its Jira tickets",
             "/          filter, Esc clears           .  all / active only      r  refresh",
-            "v          show / hide tasks, tickets, MRs, worktrees, agents, sections",
+            "v          show / hide tickets, MRs, worktrees, agents",
             "w          next agent waiting for you (blocked, or done and unseen)",
             "p          show / hide details (hidden by default under 110 columns)",
             "ctrl-d/u   scroll details               ctrl-l  redraw            q  quit",

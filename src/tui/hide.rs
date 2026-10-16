@@ -14,14 +14,11 @@ use std::path::PathBuf;
 type Flag = fn(&mut Hide) -> &mut bool;
 
 /// The toggles in the dialog, in order: a label and its flag.
-const ITEMS: [(&str, Flag); 7] = [
-    ("tasks", |h| &mut h.tasks),
+const ITEMS: [(&str, Flag); 4] = [
     ("tickets under tasks", |h| &mut h.tickets),
     ("MRs", |h| &mut h.mrs),
     ("worktrees", |h| &mut h.trees),
     ("agents", |h| &mut h.agents),
-    ("section: no task", |h| &mut h.no_task),
-    ("section: assigned to me in Jira", |h| &mut h.assigned),
 ];
 
 /// What the TUI keeps between runs.
@@ -59,7 +56,7 @@ pub(super) fn summary(hide: Hide) -> String {
     ITEMS
         .iter()
         .filter(|(_, flag)| *flag(&mut hide))
-        .map(|(label, _)| label.trim_start_matches("section: "))
+        .map(|(label, _)| *label)
         .collect::<Vec<_>>()
         .join(", ")
 }

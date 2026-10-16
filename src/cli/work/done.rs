@@ -1,80 +1,68 @@
-//! `wt done <task>` and `wt attach`: closing a task, attaching a ticket.
+//! `wt done` and `wt attach`: closing a task or worktrees, attaching a ticket.
 
-use super::common::{confirm, err, fuzzy, is_ticket_key, list, resolve_task, same_name};
+use super::common::{
+    confirm, err, find_task, fuzzy, is_ticket_key, list, resolve_task, resolve_tree, tree_table,
+};
+use super::launch::close_herdr_views;
+use crate::cli::DoneArgs;
 use crate::cli::table::load;
+use crate::client::gitlab::{MergeRequest, MrState};
+use crate::client::jira::{JiraClient, Transition};
 use crate::client::worktree;
 use crate::config::Config;
-use crate::table::{self, TaskRow};
+use crate::table::{self, Table, Tree, branch_finished};
 use crate::vault::note::Note;
+use crate::vault::task::Task;
 use serde_yaml::Value;
 
-/// Whether `name` is a task, or a ticket of one: then `wt done <name>` closes
-/// the task rather than one worktree.
-pub(in crate::cli) fn names_task(config: &Config, name: &str) -> bool {
-    load(config).is_ok_and(|tasks| {
-        tasks
-            .iter()
-            .any(|t| !t.done && (same_name(&t.name, name) || t.tickets.iter().any(|k| k == name)))
-    })
+/// `wt done`: with the name of an open task, or a ticket of one, closes the task;
+/// otherwise removes worktrees.
+pub(in crate::cli) fn cli_done(config: &Config, args: DoneArgs) -> Result<(), String> {
+    if let Some(name) = args.name.as_deref().filter(|_| !args.merged)
+        && let Ok(tasks) = load(config)
+        && let Some(i) = find_task(&tasks, name, false)?
+        && !tasks[i].done
+    {
+        return done_task(config, tasks, name, args.force, args.yes);
+    }
+    done_trees(config, args)
 }
 
 /// `wt done <task>`: the task is over. Its worktrees go (each must be finished:
 /// clean, MR merged or closed, nothing unpushed), my open tickets of it are
 /// closed in Jira, and the note gets `done: true` with the final MRs and
 /// branches — after that worktable leaves it alone.
-pub(in crate::cli) fn cli_done_task(
+fn done_task(
     config: &Config,
+    tasks: Vec<Task>,
     name: &str,
     force: bool,
     yes: bool,
 ) -> Result<(), String> {
-    let table = table::build(config, load(config)?, true);
+    let table = table::build(config, tasks, true);
     if let Some(warning) = table.warnings.first() {
         return Err(format!("{warning} — not closing a task on partial data"));
     }
-    let row = table
-        .tasks
-        .iter()
-        .find(|r| {
-            !r.task.done
-                && (same_name(&r.task.name, name) || r.task.tickets.iter().any(|k| k == name))
-        })
+    let row = find_task(table.tasks.iter().map(|r| &r.task), name, false)?
+        .map(|i| &table.tasks[i])
+        .filter(|r| !r.task.done)
         .ok_or_else(|| format!("no open task \"{name}\""))?;
 
-    // what still holds the task open
-    let mut blockers = Vec::new();
-    for &t in &row.trees {
-        let tree = table.tree(t);
-        let wt = tree.wt.name();
-        if tree.changes.unwrap_or(0) > 0 {
-            blockers.push(format!(
-                "{wt}: {} uncommitted change(s)",
-                tree.changes.unwrap_or(0)
-            ));
+    if !force {
+        // what still holds the task open
+        let mut blockers = Vec::new();
+        for &t in &row.trees {
+            blockers.extend(tree_blockers(&table, table.tree(t))?);
         }
-        match tree.mr.map(|m| table.mr(m)) {
-            Some(mr) if mr.opened() => blockers.push(format!("{wt}: MR !{} is open", mr.mr.iid())),
-            Some(mr) if !tree.finished && tree.changes == Some(0) => {
-                blockers.push(format!("{wt}: commits after MR !{}", mr.mr.iid()))
+        let held: Vec<usize> = row.trees.iter().filter_map(|&t| table.tree(t).mr).collect();
+        for &m in row.mrs.iter().filter(|m| !held.contains(m)) {
+            if table.mr(m).opened() {
+                blockers.push(format!("MR !{} is open", table.mr(m).mr.iid()));
             }
-            None if tree.unpushed.unwrap_or(0) > 0 => {
-                blockers.push(format!("{wt}: unpushed commits and no MR"))
-            }
-            _ => {}
         }
-    }
-    let held: Vec<usize> = row.trees.iter().filter_map(|&t| table.tree(t).mr).collect();
-    for &m in row.mrs.iter().filter(|m| !held.contains(m)) {
-        if table.mr(m).opened() {
-            blockers.push(format!("MR !{} is open", table.mr(m).mr.iid()));
+        if !blockers.is_empty() {
+            return Err(not_finished(&row.task.name, &blockers));
         }
-    }
-    if !blockers.is_empty() && !force {
-        return Err(format!(
-            "\"{}\" is not finished:\n  {}\nfinish these, or pass --force",
-            row.task.name,
-            blockers.join("\n  ")
-        ));
     }
 
     let keys: Vec<&String> = row.task.tickets.iter().chain(&row.found_tickets).collect();
@@ -112,18 +100,8 @@ pub(in crate::cli) fn cli_done_task(
     let mut problems = Vec::new();
     for &t in &row.trees {
         let tree = table.tree(t);
-        let removed = worktree::main_checkout(&tree.repo)
-            .and_then(|main| worktree::remove_worktree(&main, &tree.wt.path, force).map(|_| main));
-        match removed {
-            Ok(main) => {
-                if let Some(branch) = &tree.wt.branch {
-                    // squash-merged branches look unmerged to `branch -d`
-                    if let Err(e) = worktree::delete_branch(&main, branch, true) {
-                        problems.push(format!("branch {branch} kept: {e}"));
-                    }
-                }
-                println!("removed {}", tree.wt.name());
-            }
+        match remove_tree(tree, mr_of(&table, tree), force) {
+            Ok(kept) => problems.extend(kept),
             Err(e) => problems.push(format!("{}: {e}", tree.wt.name())),
         }
     }
@@ -173,7 +151,7 @@ pub(in crate::cli) fn cli_done_task(
 
     // last: this may close the tab wt itself runs in
     for &t in &row.trees {
-        crate::cli::worktrees::close_herdr_views(&table.tree(t).wt.path);
+        close_herdr_views(&table.tree(t).wt.path);
     }
     if problems.is_empty() {
         Ok(())
@@ -182,8 +160,144 @@ pub(in crate::cli) fn cli_done_task(
     }
 }
 
+/// `wt done [<worktree>]` and `wt done --merged`: worktrees go one by one, each
+/// once it is finished.
+fn done_trees(config: &Config, args: DoneArgs) -> Result<(), String> {
+    let table = tree_table(config, true)?;
+    // GitLab did not answer: the last known MR states will do, but with none at
+    // all an open MR looks like no MR
+    if let Some(warning) = table.warnings.iter().find(|w| w.starts_with("GitLab")) {
+        if !args.force && !warning.ends_with("showing cached") {
+            return Err(format!(
+                "{warning} — not removing worktrees on partial data, or pass --force"
+            ));
+        }
+        eprintln!("{warning}");
+    }
+
+    if !args.merged {
+        let tree = table.tree(resolve_tree(&table, args.name)?);
+        return done_tree(&table, tree, args.force, args.yes);
+    }
+
+    // sweep: clean worktrees whose merge request is merged or closed
+    let finished: Vec<&Tree> = table.trees.iter().filter(|t| t.finished).collect();
+    if finished.is_empty() {
+        println!("No finished worktrees");
+        return Ok(());
+    }
+    println!("Finished worktrees:");
+    for tree in &finished {
+        println!("  {}", tree.wt.name());
+    }
+    if !args.yes && !confirm("Remove all of them?")? {
+        return Ok(());
+    }
+    for tree in finished {
+        if let Err(err) = done_tree(&table, tree, false, true) {
+            eprintln!("{}: {err}", tree.wt.name());
+        }
+    }
+    Ok(())
+}
+
+/// One worktree, with its branch and herdr tabs, once nothing holds it.
+fn done_tree(table: &Table, tree: &Tree, force: bool, yes: bool) -> Result<(), String> {
+    let name = tree.wt.name();
+    if !force {
+        let blockers = tree_blockers(table, tree)?;
+        if !blockers.is_empty() {
+            return Err(not_finished(&name, &blockers));
+        }
+    }
+
+    let branch = tree.wt.branch.as_deref().unwrap_or("(detached)");
+    if !yes
+        && !confirm(&format!(
+            "Remove {name} (branch {branch}) and its herdr tabs?"
+        ))?
+    {
+        return Ok(());
+    }
+    if let Some(kept) = remove_tree(tree, mr_of(table, tree), force)? {
+        eprintln!("{kept}");
+    }
+
+    // last: this may close the pane wt itself runs in
+    close_herdr_views(&tree.wt.path);
+    Ok(())
+}
+
+/// What keeps a worktree from being removed: uncommitted changes, an open MR,
+/// commits that are nowhere but here.
+fn tree_blockers(table: &Table, tree: &Tree) -> Result<Vec<String>, String> {
+    let wt = tree.wt.name();
+    let changes = match tree.changes {
+        Some(changes) => changes,
+        None => worktree::changed_files(&tree.wt.path).map_err(err)?,
+    };
+    let mut blockers = Vec::new();
+    if changes > 0 {
+        blockers.push(format!("{wt}: {changes} uncommitted change(s)"));
+    }
+    match mr_of(table, tree) {
+        Some(mr) if mr.state() == MrState::Opened => {
+            blockers.push(format!("{wt}: MR !{} is open", mr.iid()))
+        }
+        // unknown unpushed commits count as some
+        Some(mr)
+            if tree
+                .unpushed
+                .is_none_or(|n| !branch_finished(mr, n, tree.head.as_deref())) =>
+        {
+            blockers.push(format!("{wt}: commits after MR !{}", mr.iid()))
+        }
+        None if tree.unpushed.unwrap_or(0) > 0 => {
+            blockers.push(format!("{wt}: unpushed commits and no MR"))
+        }
+        _ => {}
+    }
+    Ok(blockers)
+}
+
+fn not_finished(name: &str, blockers: &[String]) -> String {
+    format!(
+        "\"{name}\" is not finished:\n  {}\nfinish these, or pass --force",
+        blockers.join("\n  ")
+    )
+}
+
+fn mr_of<'a>(table: &'a Table, tree: &Tree) -> Option<&'a MergeRequest> {
+    tree.mr.map(|i| &table.mr(i).mr)
+}
+
+/// Removes the worktree and deletes its branch; returns why the branch was kept,
+/// when it was.
+fn remove_tree(
+    tree: &Tree,
+    mr: Option<&MergeRequest>,
+    force: bool,
+) -> Result<Option<String>, String> {
+    let name = tree.wt.name();
+    let main = worktree::main_checkout(&tree.repo).map_err(err)?;
+    worktree::remove_worktree(&main, &tree.wt.path, force).map_err(err)?;
+    println!("removed {name}");
+    let Some(branch) = &tree.wt.branch else {
+        return Ok(None);
+    };
+    // -d compares with the local master, which is usually stale, and refuses
+    // squash-merged branches; nothing is lost when every commit is on origin
+    let merged = mr.is_some_and(|mr| mr.state() == MrState::Merged);
+    let nothing_to_lose = merged || tree.unpushed.unwrap_or(0) == 0;
+    Ok(
+        worktree::delete_branch(&main, branch, force || nothing_to_lose)
+            .err()
+            .map(|e| format!("{name}: branch {branch} kept: {e}")),
+    )
+}
+
 /// Moves the ticket to a "closed"-like status of its workflow.
-fn close_in_jira(jira: &crate::client::jira::JiraClient, key: &str) -> Result<String, String> {
+fn close_in_jira(jira: &JiraClient, key: &str) -> Result<String, String> {
     let transitions = jira.transitions(key).map_err(err)?;
     let chosen =
         closing_transition(&transitions).ok_or("no closing transition from its current status")?;
@@ -193,13 +307,10 @@ fn close_in_jira(jira: &crate::client::jira::JiraClient, key: &str) -> Result<St
 
 /// A done-category transition, preferring "closed"/"done"/"resolved", never one
 /// that cancels or declines.
-fn closing_transition(
-    transitions: &[crate::client::jira::Transition],
-) -> Option<&crate::client::jira::Transition> {
+fn closing_transition(transitions: &[Transition]) -> Option<&Transition> {
     let refused = ["cancel", "declin", "reject", "won't", "отмен", "отклон"];
     let preferred = ["close", "done", "resolve", "закры", "готов", "решен"];
-    let name =
-        |t: &crate::client::jira::Transition| format!("{} {}", t.name, t.to.name).to_lowercase();
+    let name = |t: &Transition| format!("{} {}", t.name, t.to.name).to_lowercase();
     let usable: Vec<_> = transitions
         .iter()
         .filter(|t| table::Category::parse(&t.to.status_category.key) == table::Category::Done)
@@ -222,21 +333,23 @@ pub(in crate::cli) fn cli_attach(
     if !is_ticket_key(key) {
         return Err(format!("\"{key}\" is not a ticket key"));
     }
-    let table = table::build(config, load(config)?, false);
-    if let Some(row) = table
-        .tasks
-        .iter()
-        .find(|r| r.task.tickets.iter().any(|k| k == key))
-    {
-        return Err(format!("{key} is already in \"{}\"", row.task.name));
+    let tasks = load(config)?;
+    if let Some(i) = find_task(&tasks, key, false)? {
+        return Err(format!("{key} is already in \"{}\"", tasks[i].name));
     }
     let mut task = match task {
-        Some(name) => resolve_task(config, Some(&name))?,
+        Some(name) => resolve_task(config, tasks, Some(&name))?,
         None => {
-            let open: Vec<&TaskRow> = table.tasks.iter().filter(|r| !r.task.done).collect();
-            let items: Vec<String> = open.iter().map(|r| r.task.name.clone()).collect();
-            let chosen = fuzzy(&format!("Attach {key} to"), &items)?;
-            resolve_task(config, Some(&items[chosen]))?
+            let mut table = table::build(config, tasks, false);
+            let open: Vec<usize> = (0..table.tasks.len())
+                .filter(|&i| !table.tasks[i].task.done)
+                .collect();
+            let items: Vec<String> = open
+                .iter()
+                .map(|&i| table.tasks[i].task.name.clone())
+                .collect();
+            let chosen = open[fuzzy(&format!("Attach {key} to"), &items)?];
+            table.tasks.swap_remove(chosen).task
         }
     };
     let _lock = table::lock().map_err(err)?;

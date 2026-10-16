@@ -1,9 +1,8 @@
 use std::time::Duration;
 
-use crate::client::jira::JiraError::RequestResultError;
 use chrono::{DateTime, FixedOffset};
 use reqwest::StatusCode;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use thiserror::Error;
@@ -12,7 +11,6 @@ use thiserror::Error;
 pub struct JiraClient {
     client: Client,
     base_url: String,
-    headers: HeaderMap,
 }
 
 #[derive(Debug, Error)]
@@ -20,7 +18,8 @@ pub enum JiraError {
     #[error("failed during request execution: {0}")]
     RequestExecutionError(#[from] reqwest::Error),
 
-    #[error("Jira answered {0}")]
+    /// The status and the start of the response body.
+    #[error("Jira answered {0}: {1}")]
     RequestResultError(StatusCode, String),
 
     #[error("JIRA_TOKEN can't be sent in a header: {0}")]
@@ -36,6 +35,24 @@ impl JiraError {
     }
 }
 
+/// How much of an error response goes into the message: Jira answers with whole
+/// HTML pages.
+const ERROR_BODY_CHARS: usize = 300;
+
+/// The response when it is a success, otherwise its status and body as an error.
+fn checked(response: Response) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let text = response.text().unwrap_or_default();
+    let mut body: String = text.trim().chars().take(ERROR_BODY_CHARS).collect();
+    if body.len() < text.trim().len() {
+        body.push('…');
+    }
+    Err(JiraError::RequestResultError(status, body))
+}
+
 impl JiraClient {
     /// The token is trimmed: one read from a file or a shell often ends in a newline.
     pub fn new(base_url: impl Into<String>, token: &str) -> Result<Self> {
@@ -44,41 +61,29 @@ impl JiraClient {
         auth.set_sensitive(true);
         headers.insert(AUTHORIZATION, auth);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let client = Client::builder()
+            .default_headers(headers)
+            .timeout(Duration::from_secs(5))
+            .build()?;
         Ok(JiraClient {
-            client: Client::new(),
+            client,
             base_url: base_url.into(),
-            headers,
         })
     }
 
-    fn auth_headers(&self) -> HeaderMap {
-        self.headers.clone()
-    }
-
-    fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let response = self
-            .client
-            .get(url)
-            .headers(self.auth_headers())
-            .timeout(Duration::from_secs(5))
-            .send()?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().unwrap_or_default();
-            return Err(RequestResultError(
-                status,
-                format!("Request failed ({}): {}", status, text),
-            ));
-        }
-
-        Ok(response.json()?)
+    fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
+        let response = self.client.get(url).query(query).send()?;
+        Ok(checked(response)?.json()?)
     }
 
     /// The workflow transitions available on the issue now.
     pub fn transitions(&self, key: &str) -> Result<Vec<Transition>> {
         let url = format!("{}/rest/api/2/issue/{}/transitions", self.base_url, key);
-        let result: Transitions = self.get_json(&url)?;
+        let result: Transitions = self.get_json(&url, &[])?;
         Ok(result.transitions)
     }
 
@@ -87,32 +92,27 @@ impl JiraClient {
         let response = self
             .client
             .post(&url)
-            .headers(self.auth_headers())
             .timeout(Duration::from_secs(10))
             .json(&serde_json::json!({ "transition": { "id": transition_id } }))
             .send()?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().unwrap_or_default();
-            return Err(RequestResultError(status, text));
-        }
-        Ok(())
+        checked(response).map(|_| ())
     }
 
     pub fn get_issue_by_key(&self, key: &str) -> Result<JiraIssue> {
         let url = format!("{}/rest/api/2/issue/{}", self.base_url, key);
-        self.get_json(&url)
+        self.get_json(&url, &[])
     }
 
     /// Search returning only the fields `JiraIssue` needs, up to `max` issues.
     pub fn search_issues_brief(&self, jql: &str, max: usize) -> Result<Vec<JiraIssue>> {
-        let url = format!(
-            "{}/rest/api/2/search?jql={}&maxResults={}&fields=summary,status,created,updated,assignee",
-            self.base_url,
-            urlencoding::encode(jql),
-            max
-        );
-        let result: JiraSearchResult = self.get_json(&url)?;
+        let url = format!("{}/rest/api/2/search", self.base_url);
+        let max = max.to_string();
+        let query = [
+            ("jql", jql),
+            ("maxResults", max.as_str()),
+            ("fields", "summary,status,created,updated,assignee"),
+        ];
+        let result: JiraSearchResult = self.get_json(&url, &query)?;
         Ok(result.issues)
     }
 }

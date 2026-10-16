@@ -1,4 +1,5 @@
-//! Opening worktree tabs and claude agents in herdr; the hidden `wt prepare`.
+//! Opening worktree tabs and claude agents in herdr, closing them; the hidden
+//! `wt prepare`.
 
 use super::brief::{agent_prompt, write_brief};
 use super::common::{err, same_name};
@@ -75,10 +76,8 @@ pub(super) fn open_work(
         pane: pane.clone(),
         agent: agent.clone(),
     };
-    let spec_path = dirs::cache_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("worktable")
-        .join(format!("prepare-{pane}.json").replace(':', "-"));
+    let spec_path =
+        crate::config::cache_dir().join(format!("prepare-{pane}.json").replace(':', "-"));
     if let Some(parent) = spec_path.parent() {
         std::fs::create_dir_all(parent).map_err(err)?;
     }
@@ -185,7 +184,7 @@ fn open_tab(space: &str, cwd: &Path, label: &str) -> Result<(String, String), St
     match existing {
         Some(ws) => herdr::create_tab(&ws.workspace_id, cwd, label).map_err(err),
         None => {
-            let (_, tab, pane) = herdr::create_workspace(space, cwd).map_err(err)?;
+            let (tab, pane) = herdr::create_workspace(space, cwd).map_err(err)?;
             herdr::rename_tab(&tab, label).map_err(err)?;
             Ok((tab, pane))
         }
@@ -210,4 +209,52 @@ fn free_agent_name(base: &str) -> String {
         })
         .find(|candidate| !taken.contains(candidate))
         .unwrap_or(base)
+}
+
+/// herdr's agents; none outside herdr.
+pub(super) fn live_agents() -> Vec<herdr::Agent> {
+    if !herdr::available() {
+        return Vec::new();
+    }
+    herdr::list_agents().unwrap_or_default()
+}
+
+/// Closes what herdr shows of a removed worktree: its own workspace, otherwise
+/// the tabs whose agents work in it.
+pub(super) fn close_herdr_views(path: &Path) {
+    if !herdr::available() {
+        return;
+    }
+    let path_str = path.to_string_lossy();
+    let workspaces = herdr::list_workspaces().unwrap_or_default();
+    let own: Vec<_> = workspaces
+        .iter()
+        .filter(|ws| {
+            ws.worktree
+                .as_ref()
+                .is_some_and(|wt| wt.checkout_path == path_str)
+        })
+        .collect();
+
+    if !own.is_empty() {
+        for ws in own {
+            if let Err(err) = herdr::close_workspace(&ws.workspace_id) {
+                eprintln!("can't close workspace {}: {err}", ws.label);
+            }
+        }
+        return;
+    }
+
+    // a tab in the task's workspace: close the tabs whose agents work in the worktree
+    let mut tabs: Vec<String> = live_agents()
+        .into_iter()
+        .filter(|a| a.runs_in(path))
+        .map(|a| a.tab_id)
+        .collect();
+    tabs.dedup();
+    for tab in tabs {
+        if let Err(err) = herdr::close_tab(&tab) {
+            eprintln!("can't close tab {tab}: {err}");
+        }
+    }
 }

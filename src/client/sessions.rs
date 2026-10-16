@@ -76,10 +76,7 @@ pub struct Cache {
 
 impl Cache {
     fn path() -> PathBuf {
-        dirs::cache_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("worktable")
-            .join("sessions-v2.json")
+        crate::config::cache_dir().join("sessions-v2.json")
     }
 
     pub fn load() -> Cache {

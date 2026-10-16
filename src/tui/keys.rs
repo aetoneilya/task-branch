@@ -361,7 +361,7 @@ impl App {
         match self.note() {
             Some(path) => open(&format!(
                 "obsidian://open?path={}",
-                urlencoding::encode(&path.to_string_lossy())
+                percent_encode(&path.to_string_lossy())
             )),
             None => self.say("no note here"),
         }
@@ -470,6 +470,18 @@ fn add_note_line(path: &Path, line: &str) -> Result<(), String> {
     let mut note = crate::vault::note::Note::read(path).map_err(|e| e.to_string())?;
     note.append_line(line);
     note.save().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// `text` for a URL: everything but RFC 3986 unreserved characters as `%XX`.
+fn percent_encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                char::from(b).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 pub(super) fn open(target: &str) {

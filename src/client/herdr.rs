@@ -23,14 +23,19 @@ pub fn available() -> bool {
     std::env::var("HERDR_ENV").is_ok_and(|v| v == "1")
 }
 
-fn run_herdr(args: &[&str]) -> Result<serde_json::Value> {
+/// herdr's stdout, or its stderr as the error.
+fn herdr_output(args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("herdr").args(args).output()?;
     if !output.status.success() {
         return Err(HerdrError::NonZeroExit(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
     }
-    Ok(serde_json::from_slice(&output.stdout)?)
+    Ok(output.stdout)
+}
+
+fn run_herdr(args: &[&str]) -> Result<serde_json::Value> {
+    Ok(serde_json::from_slice(&herdr_output(args)?)?)
 }
 
 fn result_field<T: DeserializeOwned>(value: serde_json::Value, pointer: &str) -> Result<T> {
@@ -132,8 +137,8 @@ pub fn create_tab(workspace: &str, cwd: &Path, label: &str) -> Result<(String, S
     ))
 }
 
-/// A new workspace without moving focus; returns its id, root tab id and root pane id.
-pub fn create_workspace(label: &str, cwd: &Path) -> Result<(String, String, String)> {
+/// A new workspace without moving focus; returns its root tab id and root pane id.
+pub fn create_workspace(label: &str, cwd: &Path) -> Result<(String, String)> {
     let cwd = cwd.to_string_lossy();
     let response = run_herdr(&[
         "workspace",
@@ -145,7 +150,6 @@ pub fn create_workspace(label: &str, cwd: &Path) -> Result<(String, String, Stri
         "--no-focus",
     ])?;
     Ok((
-        result_field(response.clone(), "/result/workspace/workspace_id")?,
         result_field(response.clone(), "/result/tab/tab_id")?,
         result_field(response, "/result/root_pane/pane_id")?,
     ))
@@ -153,15 +157,7 @@ pub fn create_workspace(label: &str, cwd: &Path) -> Result<(String, String, Stri
 
 /// Types `command` and Enter into the shell of `pane`.
 pub fn run_in_pane(pane: &str, command: &str) -> Result<()> {
-    let output = Command::new("herdr")
-        .args(["pane", "run", pane, command])
-        .output()?;
-    if !output.status.success() {
-        return Err(HerdrError::NonZeroExit(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    Ok(())
+    herdr_output(&["pane", "run", pane, command]).map(|_| ())
 }
 
 /// Names the agent `pane` will host once herdr detects it, in the background:

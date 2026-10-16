@@ -1,3 +1,4 @@
+use super::StatusArgs;
 use crate::client::gitlab::MrState;
 use crate::config::{Config, VaultConfig};
 use crate::table::view::{self, Kind, Node};
@@ -5,7 +6,6 @@ use crate::table::{self, AgentStatus, Category, Table, Ticket, Tree};
 use crate::trace;
 use crate::vault::task::TaskState;
 use crate::vault::task::{Task, load_tasks};
-use serde_yaml::Value;
 use std::io::IsTerminal;
 use std::sync::LazyLock;
 
@@ -24,21 +24,16 @@ pub(super) fn load(config: &Config) -> Result<Vec<Task>, String> {
     Ok(tasks)
 }
 
-pub(super) fn cli_status(
-    config: &Config,
-    tag: Option<String>,
-    all: bool,
-    no_write: bool,
-) -> Result<(), String> {
+pub(super) fn cli_status(config: &Config, args: StatusArgs) -> Result<(), String> {
     let tasks = trace::time("tasks", || load(config))?;
     let mut table = trace::time("build", || table::build(config, tasks, true));
-    let updated = if no_write {
+    let updated = if args.no_write {
         Vec::new()
     } else {
         trace::time("write back", || table::write_back(&mut table))
     };
     trace::time("render", || {
-        print_status(&table, tag.as_deref(), all);
+        print_status(&table, args.tag.as_deref(), args.all);
         print_notes(&table, &updated);
     });
     Ok(())
@@ -501,48 +496,4 @@ fn truncate(text: &str, width: usize) -> String {
     }
     let cut: String = text.chars().take(width - 1).collect();
     format!("{cut}…")
-}
-
-/// Adds `tickets:` to notes from before worktable: from the `jira` link, otherwise
-/// from a key at the start of the file name. Dry run unless `apply`.
-pub(super) fn cli_migrate(config: &Config, apply: bool) -> Result<(), String> {
-    let tasks = load(config)?;
-    let _lock = if apply {
-        Some(table::lock().map_err(|err| format!("can't lock: {err}"))?)
-    } else {
-        None
-    };
-
-    let mut changed = 0;
-    let mut without_ticket = Vec::new();
-    for mut task in tasks {
-        if task.note.has("tickets") {
-            continue;
-        }
-        let keys = task.legacy_tickets();
-        if keys.is_empty() {
-            without_ticket.push(task.name.clone());
-            continue;
-        }
-        println!("{}: + tickets: [{}]", task.name, keys.join(", "));
-        changed += 1;
-        if apply {
-            let value = Value::Sequence(keys.into_iter().map(Value::String).collect());
-            task.note.set("tickets", value);
-            task.note.save().map_err(|err| err.to_string())?;
-        }
-    }
-
-    if !without_ticket.is_empty() {
-        println!("\nno ticket found, left as tasks without tickets:");
-        for name in &without_ticket {
-            println!("  {name}");
-        }
-    }
-    let verb = if apply { "updated" } else { "would update" };
-    println!(
-        "\n{verb} {changed} note(s){}",
-        if apply { "" } else { "; run with --apply" }
-    );
-    Ok(())
 }

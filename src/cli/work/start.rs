@@ -2,11 +2,12 @@
 
 use super::brief::brief_text;
 use super::common::{
-    branch_name, confirm, current_repo, err, fetch_issue, fuzzy, is_ticket_key, list,
-    name_from_issue, name_from_text, resolve_task, same_name,
+    branch_name, confirm, current_repo, err, fetch_issue, find_task, fuzzy, is_ticket_key, list,
+    name_from_issue, name_from_text, resolve_task,
 };
 use super::launch::open_work;
 use crate::cli::table::{load, vault};
+use crate::cli::{AddArgs, StartArgs};
 use crate::client::jira::JiraIssue;
 use crate::client::worktree;
 use crate::config::Config;
@@ -20,31 +21,32 @@ use std::io::IsTerminal;
 
 /// `wt start <task name | KEY>`: a new task (note, herdr workspace, worktree tab
 /// with claude), or work on a ticket without a note.
-#[allow(clippy::too_many_arguments)]
-pub(in crate::cli) fn cli_start(
-    config: &Config,
-    target: Option<String>,
-    tickets: Vec<String>,
-    tags: Vec<String>,
-    message: Option<String>,
-    name: Option<String>,
-    branch: Option<String>,
-    bg: bool,
-) -> Result<(), String> {
-    let tasks = load(config)?;
-    let target = match target {
+pub(in crate::cli) fn cli_start(config: &Config, args: StartArgs) -> Result<(), String> {
+    start(config, load(config)?, args)
+}
+
+fn start(config: &Config, tasks: Vec<Task>, mut args: StartArgs) -> Result<(), String> {
+    let target = match args.target.take() {
         Some(target) => target,
         None => pick_start_target(config, &tasks)?,
     };
+    let existing = find_task(&tasks, &target, false)?;
 
     if is_ticket_key(&target) {
-        if let Some(task) = tasks.iter().find(|t| t.tickets.contains(&target)) {
+        if let Some(i) = existing {
+            let task = &tasks[i];
             println!(
                 "{target} is already in task \"{}\" — adding it there",
                 task.name
             );
-            let args = vec![task.name.clone(), target];
-            return cli_add(config, args, None, name, message, bg);
+            let add_args = AddArgs {
+                args: vec![task.name.clone(), target],
+                in_tree: None,
+                name: args.name,
+                message: args.message,
+                bg: args.bg,
+            };
+            return add(config, tasks, add_args);
         }
         // work always gets a task: a note for shared context and agents' findings,
         // named after the ticket
@@ -54,16 +56,30 @@ pub(in crate::cli) fn cli_start(
             return Err(format!("{target} has no summary to name the task after"));
         }
         let mut keys = vec![target.clone()];
-        keys.extend(tickets.into_iter().filter(|k| k != &target));
-        return cli_start(config, Some(title), keys, tags, message, name, branch, bg);
+        keys.extend(args.tickets.into_iter().filter(|k| k != &target));
+        let args = StartArgs {
+            target: Some(title),
+            tickets: keys,
+            ..args
+        };
+        return start(config, tasks, args);
     }
 
-    if let Some(task) = tasks.iter().find(|t| same_name(&t.name, &target)) {
+    if let Some(i) = existing {
         return Err(format!(
             "task \"{0}\" already exists: wt select \"{0}\" to get back to it, wt add \"{0}\" <KEY> to add a ticket",
-            task.name
+            tasks[i].name
         ));
     }
+    let StartArgs {
+        tickets,
+        tags,
+        message,
+        name,
+        branch,
+        bg,
+        ..
+    } = args;
     let similar = similar_tasks(&tasks, &target, &tags);
     if !similar.is_empty() && std::io::stdin().is_terminal() {
         println!("similar tasks: {}", similar.join(", "));
@@ -126,14 +142,18 @@ pub(in crate::cli) fn cli_start(
 
 /// `wt add [<task>] <KEY>`: the ticket joins the task and gets a tab in the
 /// task's herdr workspace, in a new worktree or `--in` one the task has.
-pub(in crate::cli) fn cli_add(
-    config: &Config,
-    args: Vec<String>,
-    in_tree: Option<String>,
-    name: Option<String>,
-    message: Option<String>,
-    bg: bool,
-) -> Result<(), String> {
+pub(in crate::cli) fn cli_add(config: &Config, args: AddArgs) -> Result<(), String> {
+    add(config, load(config)?, args)
+}
+
+fn add(config: &Config, tasks: Vec<Task>, args: AddArgs) -> Result<(), String> {
+    let AddArgs {
+        args,
+        in_tree,
+        name,
+        message,
+        bg,
+    } = args;
     let (task_arg, key) = match args.as_slice() {
         [key] => (None, key.clone()),
         [task, key] => (Some(task.clone()), key.clone()),
@@ -144,7 +164,7 @@ pub(in crate::cli) fn cli_add(
             "\"{key}\" is not a ticket key: wt add [<task>] <KEY>"
         ));
     }
-    let mut task = resolve_task(config, task_arg.as_deref())?;
+    let mut task = resolve_task(config, tasks, task_arg.as_deref())?;
 
     if !task.tickets.contains(&key) {
         let _lock = table::lock().map_err(err)?;

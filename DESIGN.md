@@ -34,7 +34,7 @@ task  (note: shared context; any size — a "project" is just a big task)
   worktree belongs to a task by its branch's ticket key, or because an agent in
   the task's workspace works in it — so a branch without a key (a quick fix
   spun off during the task) still lands in the task.
-- **Ticket → task** is set explicitly (`wt add`, `wt start <name> -k`, or by
+- **Ticket → task** is set explicitly (`wt add`, `wt attach`, `wt start <name> -k`, or by
   editing `tickets:`), and by sync: a key on a worktree or MR that belongs to the
   task (through its herdr workspace or a worktree's branch) and that no note
   lists yet is added to the task's `tickets:`. Everything else is derived.
@@ -100,7 +100,7 @@ closed: 2026-11-02
   touched by sync again, so links that depended on a live worktree do not evaporate.
 - Everything else (MR states, pipelines, approvals, Jira statuses, worktrees,
   local changes, agents) is live and lives only in the TUI / `wt status`, backed by a
-  disposable cache in `~/.cache/worktable/`.
+  disposable cache in the user cache dir (`~/Library/Caches/worktable/` on macOS).
 - Frontmatter is parsed as real YAML on read (the Obsidian Properties UI rewrites
   flow lists into block lists, requotes, reorders). Writes replace only the
   managed keys' lines — whichever style they are in — and leave every other line,
@@ -142,12 +142,12 @@ and can be resumed later, also after the worktree was removed.
 - **Discovery.** Transcripts live under the directory claude was *launched*
   in, often the main checkout, while the work happens in a worktree. So the
   transcripts of the main checkouts and of every worktree are parsed (cached by
-  size + mtime in `~/.cache/worktable/sessions.json`), and a session belongs to a
+  size + mtime in `<cache dir>/sessions-v2.json`), and a session belongs to a
   task when its records' `cwd` fall into one of the task's worktrees; new ids are
   added to `sessions`. The key is append-only: removing
   a worktree drops it from `worktrees`, never from `sessions`, so the path is
-  remembered through the session entry. Sessions started elsewhere (main checkout,
-  the vault) are attached by hand: `wt attach-session <id> <task>`.
+  remembered through the session entry. Sessions that never enter a worktree
+  (the vault, say) are attached only by adding them to `sessions:` by hand.
 - **Stored in the note:** id, worktree name, date only. Transcripts are never
   copied into the vault: they are large (hundreds of MB in total) and can contain
   tokens read from config files; the vault is git-backed and synced to the phone.
@@ -179,12 +179,12 @@ The daily workflow is five commands (decided 2026-10-09):
 ```
 wt                          TUI
 wt start <task name | KEY>  start new work
-wt add [<task>] <KEY>       add a ticket to an existing task, with its own workspace
+wt add [<task>] <KEY>       add a ticket to an existing task, with its own worktree tab
 wt select [<task | KEY>]    go back to existing work
 wt status                   the table in plain text
 ```
 
-### `wt start <task name | KEY> [-k KEY]... [-t tag]... [-m text] [-n name] [--tab] [--bg]`
+### `wt start <task name | KEY> [-k KEY]... [-t tag]... [-m text] [-n name] [-b branch] [--bg]`
 
 - **A ticket key** (`UCP-12345`) — a new task named after the ticket's summary
   (characters a file name can't hold dropped), with that ticket: the same as
@@ -206,7 +206,7 @@ git's own checkout progress, then the brief; the tab's shell then cds into the
 worktree and starts `command claude` — herdr shows the branch of the shell's
 cwd. The agent is named in the background once herdr detects it.
 
-### `wt add [<task>] <KEY> [--in <worktree>] [-n name] [--tab] [--bg]`
+### `wt add [<task>] <KEY> [--in <worktree>] [-n name] [-m text] [--bg]`
 
 Attaches the ticket to the task (writes `tickets:`) and opens a tab for it in
 the task's herdr workspace (creating the workspace if it is gone): a new worktree
@@ -215,24 +215,26 @@ MRs that share one worktree) — then only a new agent in that worktree. The age
 is briefed with the task note plus the ticket. `<task>` defaults to the task of
 the current worktree, otherwise a fuzzy picker.
 
-### `wt select [<task | KEY>] [--session]`
+### `wt select [<task | KEY>] [--tree <worktree>] [--session] [--bg]`
 
 Returns to existing work; without an argument a fuzzy picker over open tasks and
-note-less tickets with worktrees, most recently active first. Then, for the
+note-less tickets with worktrees, those with live agents first. Then, for the
 chosen work's worktree (picker if the task has several):
 
 1. a live agent → focus its tab in the task's herdr workspace;
 2. worktree exists, no agent → a tab in the task's workspace (created if gone)
-   + `claude --continue`
+   + `claude --resume` of the last session held in that worktree, or a fresh
+   claude briefed from the note
    (`--session` picks one of the task's sessions → `claude --resume <id>`);
 3. worktree removed, branch still exists locally or on origin → recreate the
    worktree at the same path (sessions are keyed by directory), then as 2;
 4. branch gone → says so; the task note and session ids remain.
 
-### `wt status [-t tag] [--all]`
+### `wt status [-t tag] [--all] [--no-write]`
 
-Plain-text table, the same rows as the TUI (both walk one view model,
-`src/table/view.rs`): task → worktrees with local changes / unpushed commits,
+Plain-text table, the same rows and marks as the TUI (both walk one view model,
+`src/table/view.rs`, and take glyphs, labels and colors from `src/table/look.rs`):
+task → worktrees with local changes / unpushed commits,
 their MR and agents, then MRs without a worktree; then the `no task` and
 `assigned to me in Jira` sections. Ticket rows show only with `--all`, which also
 adds what the TUI's `.` adds. Also the format agents and scripts read, so it is
@@ -241,7 +243,8 @@ kept stable.
 ### Less frequent
 
 ```
-wt review [<worktree>] [--model M]   reviewer agent next to the task agent
+wt review [<worktree>]   reviewer agent next to the task agent
+                         (model: `[workflow] review_model`)
 wt done [<task | worktree>] [--merged] [--force] [-y]
                     remove worktrees, branches, herdr views. On a task: refuses
                     while anything is open (uncommitted, open MR, unpushed),
@@ -249,19 +252,14 @@ wt done [<task | worktree>] [--merged] [--force] [-y]
                     transition like Closed, never Cancelled; others' tickets are
                     left open), writes done: true, closed, mrs, branches.
                     --merged: sweep all finished worktrees
+wt attach <KEY> [<task>]   put a ticket into a task, no worktree or agent
 wt note "<text>"    (agents) append to the task's `## Agent notes`
-wt open [<task>]    the note in Obsidian
-wt attach-session <id> <task>   a claude session held outside a worktree
-wt migrate [--apply]            convert old notes; dry run by default
-wt ticket new …                 create a Jira ticket — the only command that does
+wt completions <shell>     shell completion script
 ```
 
-There is no separate sync command: every `wt` invocation refreshes the cache if
-it is older than a few minutes and writes changed `state`/`sessions`. Nothing
-creates tickets or notes implicitly — notes only by `wt start <name>`, tickets
-only by `wt ticket new`.
-
-jg's `list`, `mr`, `switch` and `info` are folded into the TUI and removed.
+There is no separate sync command: `wt status` and the TUI's refresh write
+changed `state`, `sessions` and found tickets. Nothing creates notes implicitly —
+only `wt start`; worktable never creates tickets.
 
 ## TUI
 
@@ -316,8 +314,7 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 Commands that may ask (pickers, confirmations) get the terminal and return on ⏎;
 `wt done` keeps its own confirmation listing what goes.
 
-Not yet: Review tab, attaching a loose ticket to a task without a worktree,
-editing tags.
+Not yet: Review tab, editing tags.
 
 ## Config
 
@@ -350,31 +347,6 @@ ide = "IntelliJ IDEA"               # optional, the default
 Multiple `[[repo]]` from day one: worktrees and MRs are collected per repo.
 Tokens stay in `JIRA_TOKEN` / `GITLAB_TOKEN`. `WT_TRACE=1` prints how long each
 fetch, the matching and the rendering took to stderr.
-
-## Migration of existing notes
-
-`wt migrate` (dry run prints a diff per file; `--apply` writes):
-
-- `jira: <url>` → add `tickets: [KEY]`; `jira` stays.
-- No `jira` → key from the file name `UCP-\d+`; none → task without tickets.
-- `done`, `project`, everything else untouched; files not renamed.
-- First sync fills managed keys.
-
-## Phases
-
-Actions come before the TUI: the daily workflow is the five commands, and the
-note writer has to prove itself on the real vault before more is built on it.
-
-1. **Model + status.** Rename crate to `worktable`, binary `wt`; config; note
-   reader (real YAML) and managed-key writer with tests; matching; cache;
-   sessions discovery; `wt status`, `wt migrate`; `tasks.base`.
-2. **Workflow.** `wt start`, `wt add`, `wt select`, `wt done`, `wt review`,
-   `wt note`, ported from jg onto tasks with note-based briefs; delete
-   `~/.local/bin/wt`, uninstall `jg`. Then about two weeks of daily use.
-3. **TUI.** Tree, details, filters, background refresh; keys map onto the same
-   commands.
-4. **Extras.** Review tab; task/ticket in the herdr sidebar via
-   `herdr workspace report-metadata`.
 
 ## Non-goals
 

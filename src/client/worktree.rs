@@ -11,10 +11,10 @@ pub enum GitError {
     NonZeroExit(String),
 
     #[error("repo path not utf8")]
-    RepoPathNotUtf8(),
+    RepoPathNotUtf8,
 
     #[error("failed to obtain current branch")]
-    CurrentBranchNotFound(),
+    CurrentBranchNotFound,
 }
 
 pub(crate) type Result<T> = std::result::Result<T, GitError>;
@@ -96,7 +96,7 @@ pub fn linked_worktrees(repo: &Path) -> Result<Vec<Worktree>> {
 pub fn current_branch(path: &Path) -> Result<String> {
     let branch = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if branch.is_empty() {
-        return Err(GitError::CurrentBranchNotFound());
+        return Err(GitError::CurrentBranchNotFound);
     }
     Ok(branch)
 }
@@ -130,7 +130,7 @@ pub fn branch_head(path: &Path, branch: &str) -> Result<String> {
 }
 
 pub fn remove_worktree(repo: &Path, worktree: &Path, force: bool) -> Result<()> {
-    let path = worktree.to_str().ok_or(GitError::RepoPathNotUtf8())?;
+    let path = worktree.to_str().ok_or(GitError::RepoPathNotUtf8)?;
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");
@@ -177,7 +177,7 @@ pub struct WorktreePlan {
 
 pub fn plan_worktree(main: &Path, name: &str, branch: &str) -> Result<WorktreePlan> {
     let dir = worktree_dir(main, name);
-    let path = dir.to_str().ok_or(GitError::RepoPathNotUtf8())?.to_string();
+    let path = dir.to_str().ok_or(GitError::RepoPathNotUtf8)?.to_string();
     if branch_exists(main, branch) {
         return Ok(WorktreePlan {
             add: vec!["worktree".into(), "add".into(), path, branch.into()],

@@ -26,10 +26,7 @@ pub(super) struct RemoteCache {
 
 impl RemoteCache {
     fn path() -> PathBuf {
-        dirs::cache_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("worktable")
-            .join("remote.json")
+        crate::config::cache_dir().join("remote.json")
     }
 
     pub(super) fn load() -> Option<RemoteCache> {

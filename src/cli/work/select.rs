@@ -1,7 +1,9 @@
 //! `wt select`: back to existing work, focusing its agent or resuming its session.
 
-use super::common::{current_repo, err, fuzzy, is_ticket_key, same_name};
+use super::brief::brief_path;
+use super::common::{current_repo, err, find_task, fuzzy, is_ticket_key};
 use super::launch::{launch, open_agent};
+use crate::cli::SelectArgs;
 use crate::cli::table::load;
 use crate::client::{herdr, worktree};
 use crate::config::Config;
@@ -17,18 +19,18 @@ enum Work {
 /// `wt select [<task | KEY>]`: back to existing work — focus its agent, or start
 /// claude in its worktree resuming the last session, restoring the worktree if
 /// it was removed.
-pub(in crate::cli) fn cli_select(
-    config: &Config,
-    target: Option<String>,
-    tree_name: Option<String>,
-    pick_session: bool,
-    bg: bool,
-) -> Result<(), String> {
+pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<(), String> {
+    let SelectArgs {
+        target,
+        tree: tree_name,
+        session: pick_session,
+        bg,
+    } = args;
     let table = table::build(config, load(config)?, false);
     let key = target.clone().filter(|t| is_ticket_key(t));
     let work = match target {
         Some(target) => {
-            find_work(&table, &target).ok_or_else(|| format!("no task or ticket \"{target}\""))?
+            find_work(&table, &target)?.ok_or_else(|| format!("no task or ticket \"{target}\""))?
         }
         None => pick_work(&table)?,
     };
@@ -121,9 +123,7 @@ pub(in crate::cli) fn cli_select(
     if let Some(last) = sessions.iter().find(|s| s.worktree == tree.wt.name()) {
         return resume(&table, &space, last, &tree.wt.path, note, bg);
     }
-    let brief = worktree::git_dir(&tree.wt.path)
-        .map_err(err)?
-        .join("task.md");
+    let brief = brief_path(&tree.wt.path)?;
     launch(&space, &tree.wt.path, &tree.wt.name(), note, &brief, !bg)
 }
 
@@ -157,7 +157,7 @@ fn resume(
             "Claude Code has already deleted conversation {} — starting a new session",
             session.id
         );
-        let brief = worktree::git_dir(tree).map_err(err)?.join("task.md");
+        let brief = brief_path(tree)?;
         return launch(space, tree, &session.worktree, note, &brief, !bg);
     };
     let launch_dir = transcript
@@ -179,7 +179,7 @@ fn resume(
 /// removed: sessions are keyed by directory.
 fn restore_worktree(config: &Config, row: Option<&TaskRow>, name: &str) -> Result<PathBuf, String> {
     let main = current_repo(config)?;
-    let dir = main.join(".claude/worktrees").join(name);
+    let dir = worktree::worktree_dir(&main, name);
     if dir.exists() {
         return Ok(dir);
     }
@@ -204,41 +204,16 @@ fn restore_worktree(config: &Config, row: Option<&TaskRow>, name: &str) -> Resul
     Ok(dir)
 }
 
-fn find_work(table: &Table, target: &str) -> Option<Work> {
-    let open = |r: &&TaskRow| !r.task.done;
-    if is_ticket_key(target) {
-        if let Some(i) = table
-            .tasks
-            .iter()
-            .position(|r| r.task.tickets.iter().any(|k| k == target))
-        {
-            return Some(Work::Task(i));
-        }
-        return table
-            .loose
-            .iter()
-            .position(|l| l.key == target)
-            .map(Work::Ticket);
+/// A task by `find_task`; a ticket key of no task, its worktrees.
+fn find_work(table: &Table, target: &str) -> Result<Option<Work>, String> {
+    let key = is_ticket_key(target);
+    if let Some(i) = find_task(table.tasks.iter().map(|r| &r.task), target, !key)? {
+        return Ok(Some(Work::Task(i)));
     }
-    if let Some(i) = table
-        .tasks
-        .iter()
-        .position(|r| same_name(&r.task.name, target))
-    {
-        return Some(Work::Task(i));
-    }
-    let needle = target.to_lowercase();
-    let partial: Vec<usize> = table
-        .tasks
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| open(r) && r.task.name.to_lowercase().contains(&needle))
-        .map(|(i, _)| i)
-        .collect();
-    match partial.as_slice() {
-        [i] => Some(Work::Task(*i)),
-        _ => None,
-    }
+    Ok(key
+        .then(|| table.loose.iter().position(|l| l.key == target))
+        .flatten()
+        .map(Work::Ticket))
 }
 
 /// Open tasks, then tickets without a task that have worktrees; agents first.

@@ -110,28 +110,6 @@ impl Task {
             note,
         }
     }
-
-    /// Tickets an old note refers to without a `tickets` key: the `jira` link,
-    /// otherwise a key at the start of the file name.
-    pub fn legacy_tickets(&self) -> Vec<String> {
-        if self.note.has("tickets") {
-            return Vec::new();
-        }
-        let from_jira: Vec<String> = self
-            .note
-            .strings("jira")
-            .iter()
-            .flat_map(|j| ticket_keys(j))
-            .collect();
-        if !from_jira.is_empty() {
-            return from_jira;
-        }
-        TICKET_KEY
-            .find(&self.name)
-            .filter(|m| m.start() == 0)
-            .map(|m| vec![m.as_str().to_string()])
-            .unwrap_or_default()
-    }
 }
 
 /// Task notes under the configured folders; notes whose frontmatter does not

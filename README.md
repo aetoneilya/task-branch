@@ -55,7 +55,6 @@ wt attach <KEY> [<task>]   put a ticket into a task without a worktree
 wt select [<task|KEY>]     go back to a task: its agent, or claude resuming its session
 wt note "<text>"           (for agents) append a finding to the note's "Agent notes"
 wt status                  the table in plain text; updates `state` and `sessions` in notes
-wt migrate [--apply]       add `tickets:` to notes made before worktable
 wt review [<worktree>]     start a reviewer agent next to the worktree's agent
 wt done [<task|worktree>] [--merged] [--force] [-y]
                            close a task (worktrees, my Jira tickets, note marked done),

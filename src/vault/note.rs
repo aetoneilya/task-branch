@@ -66,10 +66,6 @@ impl Note {
             .unwrap_or_default()
     }
 
-    pub fn has(&self, key: &str) -> bool {
-        self.frontmatter.contains_key(key)
-    }
-
     pub fn string(&self, key: &str) -> Option<String> {
         self.frontmatter.get(key).and_then(scalar_string)
     }

@@ -76,7 +76,7 @@ impl Config {
     }
 }
 
-pub fn expand_home(path: &Path) -> PathBuf {
+fn expand_home(path: &Path) -> PathBuf {
     match (path.strip_prefix("~"), dirs::home_dir()) {
         (Ok(rest), Some(home)) => home.join(rest),
         _ => path.to_path_buf(),
@@ -94,15 +94,25 @@ pub fn load_config() -> Result<Config, ConfigError> {
         .map(PathBuf::from)
         .unwrap_or_else(|| base.join("worktable").join("config.toml"));
 
-    let contents = fs::read_to_string(config_path)?;
-    let config: Config = toml::from_str(&contents)?;
+    let contents =
+        fs::read_to_string(&config_path).map_err(|e| ConfigError::Read(config_path.clone(), e))?;
+    let config: Config =
+        toml::from_str(&contents).map_err(|e| ConfigError::Parse(config_path, e))?;
     Ok(config.expand())
+}
+
+/// worktable's own cache: last Jira and GitLab answers, the session index, the
+/// notes lock, `wt prepare` specs.
+pub fn cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("worktable")
 }
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("failed to load config")]
-    ConfigLoadError(#[from] std::io::Error),
-    #[error("failed to deserialize config")]
-    DeserializationError(#[from] toml::de::Error),
+    #[error("can't read config {}: {}", .0.display(), .1)]
+    Read(PathBuf, #[source] std::io::Error),
+    #[error("can't parse config {}: {}", .0.display(), .1)]
+    Parse(PathBuf, #[source] toml::de::Error),
 }

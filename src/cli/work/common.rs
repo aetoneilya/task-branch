@@ -1,6 +1,6 @@
-//! Helpers shared by the work commands: errors, names, repo lookup, pickers.
+//! Helpers shared by the work commands: errors, names, repo, task and worktree
+//! lookup, pickers.
 
-use crate::cli::table::load;
 use crate::client::jira::JiraIssue;
 use crate::client::worktree;
 use crate::config::Config;
@@ -134,22 +134,58 @@ pub(super) fn current_task(table: &Table) -> Option<usize> {
         .position(|r| open(r) && r.space.as_deref() == Some(space.as_str()))
 }
 
-/// A task by name (exact, then a unique partial match), otherwise the current
-/// one, otherwise a picker.
-pub(super) fn resolve_task(config: &Config, arg: Option<&str>) -> Result<Task, String> {
-    let mut tasks = load(config)?;
-    if let Some(arg) = arg {
-        if let Some(i) = tasks.iter().position(|t| same_name(&t.name, arg)) {
-            return Ok(tasks.swap_remove(i));
+/// A task by ticket key, or by name; open tasks win over done ones. With
+/// `partial`, otherwise the only open task whose name contains `target`.
+/// Index into `tasks`.
+pub(super) fn find_task<'a, I>(
+    tasks: I,
+    target: &str,
+    partial: bool,
+) -> Result<Option<usize>, String>
+where
+    I: IntoIterator<Item = &'a Task>,
+    I::IntoIter: Clone,
+{
+    let tasks = tasks.into_iter();
+    let names = |t: &Task| {
+        if is_ticket_key(target) {
+            t.tickets.iter().any(|k| k == target)
+        } else {
+            same_name(&t.name, target)
         }
-        let needle = arg.to_lowercase();
-        let partial: Vec<usize> = (0..tasks.len())
-            .filter(|&i| !tasks[i].done && tasks[i].name.to_lowercase().contains(&needle))
-            .collect();
-        return match partial.as_slice() {
-            [i] => Ok(tasks.swap_remove(*i)),
-            [] => Err(format!("no task \"{arg}\": wt start \"{arg}\" creates it")),
-            _ => Err(format!("\"{arg}\" matches several tasks, be more specific")),
+    };
+    let found = tasks
+        .clone()
+        .position(|t| !t.done && names(t))
+        .or_else(|| tasks.clone().position(names));
+    if found.is_some() || !partial {
+        return Ok(found);
+    }
+    let needle = target.to_lowercase();
+    let matches: Vec<usize> = tasks
+        .enumerate()
+        .filter(|(_, t)| !t.done && t.name.to_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [i] => Ok(Some(*i)),
+        _ => Err(format!(
+            "\"{target}\" matches several tasks, be more specific"
+        )),
+    }
+}
+
+/// A task by `find_task`, otherwise the current one, otherwise a picker.
+pub(super) fn resolve_task(
+    config: &Config,
+    mut tasks: Vec<Task>,
+    arg: Option<&str>,
+) -> Result<Task, String> {
+    if let Some(arg) = arg {
+        return match find_task(&tasks, arg, true)? {
+            Some(i) => Ok(tasks.swap_remove(i)),
+            None => Err(format!("no task \"{arg}\": wt start \"{arg}\" creates it")),
         };
     }
     let mut table = table::build(config, tasks, false);
@@ -165,4 +201,40 @@ pub(super) fn resolve_task(config: &Config, arg: Option<&str>) -> Result<Task, S
         .collect();
     let chosen = open[fuzzy("Task", &items)?];
     Ok(table.tasks.swap_remove(chosen).task)
+}
+
+/// Every worktree of the configured repos; `online` adds MRs, changes and
+/// unpushed counts.
+pub(super) fn tree_table(config: &Config, online: bool) -> Result<Table, String> {
+    if config.repos.is_empty() {
+        return Err("no [[repo]] in ~/.config/worktable/config.toml".to_string());
+    }
+    // tasks don't decide which worktree is which, and are not needed here
+    Ok(table::build(config, Vec::new(), online))
+}
+
+/// A worktree by name or branch, otherwise the one containing the cwd, otherwise
+/// a picker. Index into `table.trees`.
+pub(super) fn resolve_tree(table: &Table, name: Option<String>) -> Result<usize, String> {
+    let trees = &table.trees;
+
+    if let Some(name) = name {
+        return trees
+            .iter()
+            .position(|t| t.wt.name() == name || t.wt.branch.as_deref() == Some(name.as_str()))
+            .ok_or_else(|| format!("No worktree named {name}"));
+    }
+
+    let root = std::env::current_dir()
+        .ok()
+        .and_then(|d| worktree::worktree_root(&d).ok());
+    if let Some(i) = root.and_then(|root| trees.iter().position(|t| t.wt.path == root)) {
+        return Ok(i);
+    }
+
+    if trees.is_empty() {
+        return Err("No linked worktrees".to_string());
+    }
+    let names: Vec<String> = trees.iter().map(|t| t.wt.name()).collect();
+    fuzzy("Worktree", &names)
 }

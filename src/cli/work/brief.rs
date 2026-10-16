@@ -101,7 +101,12 @@ pub(super) fn brief_text(
 /// The brief goes to the worktree's git dir: never committed, removed with the
 /// worktree. herdr can't pass multi-line arguments, so the prompt points at it.
 pub(super) fn write_brief(tree: &Path, brief: &str) -> Result<PathBuf, String> {
-    let path = worktree::git_dir(tree).map_err(err)?.join("task.md");
+    let path = brief_path(tree)?;
     std::fs::write(&path, brief).map_err(err)?;
     Ok(path)
+}
+
+/// Where `write_brief` puts the brief of the worktree `tree`.
+pub(super) fn brief_path(tree: &Path) -> Result<PathBuf, String> {
+    Ok(worktree::git_dir(tree).map_err(err)?.join("task.md"))
 }

@@ -357,9 +357,7 @@ pub fn write_back(table: &mut Table) -> Vec<String> {
 
 /// Serialises note writes between concurrent `wt` processes.
 pub fn lock() -> std::io::Result<File> {
-    let dir = dirs::cache_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("worktable");
+    let dir = crate::config::cache_dir();
     std::fs::create_dir_all(&dir)?;
     let file = OpenOptions::new()
         .create(true)

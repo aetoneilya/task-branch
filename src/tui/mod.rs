@@ -220,9 +220,6 @@ impl App {
             .enumerate()
             .filter(|(_, r)| match r.kind {
                 Kind::Agent(t, a) => self.table.tree(t).agents[a].status.waiting(),
-                Kind::Tree(t) if self.hide.agents => {
-                    self.table.tree(t).agents.iter().any(|a| a.status.waiting())
-                }
                 _ => false,
             })
             .map(|(i, _)| i)

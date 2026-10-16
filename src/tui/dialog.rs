@@ -374,7 +374,7 @@ impl App {
             Dialog::Hide { selected } => (
                 "show",
                 super::hide::lines(self.hide, *selected),
-                "↑↓ move   space toggle   1-4 toggle   Esc close",
+                "↑↓ move   space toggle   Esc close",
             ),
         };
 

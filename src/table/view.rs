@@ -83,7 +83,6 @@ pub struct Hide {
     /// Worktrees, and their agents with them; an MR a worktree held goes under
     /// its ticket.
     pub trees: bool,
-    pub agents: bool,
 }
 
 impl Hide {
@@ -303,7 +302,7 @@ fn tree_nodes(table: &Table, trees: &[usize], all: bool, hide: Hide) -> (Vec<Nod
                 .mr
                 .filter(|&m| !hide.mrs && (all || table.mr(m).opened()))
                 .map(mr_node);
-            let agents = (0..tree.agents.len()).filter(|_| !hide.agents).map(|a| {
+            let agents = (0..tree.agents.len()).map(|a| {
                 Node::leaf(
                     format!("agent:{}:{a}", tree.wt.path.display()),
                     Kind::Agent(t, a),
@@ -428,13 +427,13 @@ mod tests {
         assert_eq!(
             shown(Hide {
                 mrs: true,
-                agents: true,
                 ..Default::default()
             }),
             vec![
                 "task:a2i",
                 "  ticket:a2i:UCP-1",
                 "  tree:/a",
+                "    agent:/a:0",
                 "header:no task",
                 "tree:/misc",
                 "header:assigned to me in Jira",

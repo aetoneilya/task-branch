@@ -14,11 +14,10 @@ use std::path::PathBuf;
 type Flag = fn(&mut Hide) -> &mut bool;
 
 /// The toggles in the dialog, in order: a label and its flag.
-const ITEMS: [(&str, Flag); 4] = [
+const ITEMS: [(&str, Flag); 3] = [
     ("tickets under tasks", |h| &mut h.tickets),
     ("MRs", |h| &mut h.mrs),
-    ("worktrees", |h| &mut h.trees),
-    ("agents", |h| &mut h.agents),
+    ("worktrees and agents", |h| &mut h.trees),
 ];
 
 /// What the TUI keeps between runs.
@@ -66,36 +65,23 @@ impl App {
         self.dialog = Some(Dialog::Hide { selected: 0 });
     }
 
-    /// ↑↓ move, space or ⏎ toggles, a digit toggles its item; Esc, q or v closes.
+    /// ↑↓ move, space or ⏎ toggles; Esc, q or v closes.
     /// The dialog is taken out of `self` while its key is handled.
     pub(super) fn on_hide_key(&mut self, key: KeyEvent, selected: usize) {
-        let digit = |c: char| {
-            c.to_digit(10)
-                .map(|d| d as usize)
-                .filter(|d| (1..=ITEMS.len()).contains(d))
-        };
-        let index = match key.code {
+        let selected = match key.code {
             KeyCode::Esc | KeyCode::Char('q' | 'v') => return,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.dialog = Some(Dialog::Hide {
-                    selected: selected.saturating_sub(1),
-                });
-                return;
+            KeyCode::Up | KeyCode::Char('k') => selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => (selected + 1).min(ITEMS.len() - 1),
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                self.toggle(selected);
+                selected
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.dialog = Some(Dialog::Hide {
-                    selected: (selected + 1).min(ITEMS.len() - 1),
-                });
-                return;
-            }
-            KeyCode::Char(' ') | KeyCode::Enter => selected,
-            KeyCode::Char(c) if digit(c).is_some() => digit(c).unwrap_or(1) - 1,
-            _ => {
-                self.dialog = Some(Dialog::Hide { selected });
-                return;
-            }
+            _ => selected,
         };
-        self.dialog = Some(Dialog::Hide { selected: index });
+        self.dialog = Some(Dialog::Hide { selected });
+    }
+
+    fn toggle(&mut self, index: usize) {
         let flag = ITEMS[index].1(&mut self.hide);
         *flag = !*flag;
         self.rebuild();
@@ -122,7 +108,7 @@ pub(super) fn lines(hide: Hide, selected: usize) -> Vec<Line<'static>> {
             Line::from(vec![
                 Span::raw(mark),
                 Span::styled(
-                    format!("{} {}  {label}", i + 1, if shown { "[x]" } else { "[ ]" }),
+                    format!("{}  {label}", if shown { "[x]" } else { "[ ]" }),
                     style,
                 ),
             ])

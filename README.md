@@ -68,7 +68,7 @@ wt completions <shell>     shell completion script
 
 `?` shows all keys. The main ones:
 
-- `↑↓`/`jk` move, `←→`/`hl`/space fold, `/` filter, `.` all / active only, `v` hide MRs, agents, …
+- `↑↓`/`jk` move, `←→`/`hl`/space fold, `/` filter, `.` all / active only, `v` hide MRs, worktrees, …
 - `⏎` focus the agent, or resume work (`wt select`)
 - `n` new task, `s` start a ticket / add one to a task, `a` attach a ticket
 - `b` browser, `o` note in Obsidian, `e` note in `$EDITOR`, `i` worktree in the IDE

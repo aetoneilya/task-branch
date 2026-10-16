@@ -314,8 +314,13 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 | `space` `h` `l` | — | fold, fold / to parent, unfold |
 | `r`, `?`, `q` | — | refresh, keys, quit |
 
-Commands that may ask (pickers, confirmations) get the terminal and return on ⏎;
-`wt done` keeps its own confirmation listing what goes.
+Commands run in the TUI process, on a background thread, behind a dialog: their
+lines show there, and their pickers and confirmations are asked there (a `Ui`
+trait: dialoguer and stdout in the CLI, the update channel in the TUI). `d`
+checks first and lists what goes before `y`; a blocked task or worktree only
+shows its blockers. Work that was opened (`select`, `start`, `add`) closes the
+dialog with its last line in the footer, and a herdr popup with it. Only
+`wt prepare` runs as a process: in the new tab, before claude.
 
 Not yet: Review tab, editing tags.
 

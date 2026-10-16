@@ -7,10 +7,52 @@ use crate::config::Config;
 use crate::table::{self, Table, TaskRow};
 use crate::vault::task::{Task, ticket_keys};
 use dialoguer::theme::ColorfulTheme;
-use dialoguer::{Confirm, FuzzySelect};
+use dialoguer::{Confirm, FuzzySelect, Input};
 use serde_yaml::Value;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+
+/// Where a command reports and asks: the terminal, or a TUI dialog.
+pub(crate) trait Ui {
+    fn say(&mut self, line: String);
+    /// The index of the chosen item, or why there is none.
+    fn pick(&mut self, prompt: &str, items: &[String]) -> Result<usize, String>;
+    fn confirm(&mut self, prompt: &str) -> Result<bool, String>;
+    fn input(&mut self, prompt: &str) -> Result<String, String>;
+    /// Whether questions reach anyone: without that, what a command can do
+    /// without asking it does unasked.
+    fn can_ask(&self) -> bool {
+        true
+    }
+}
+
+/// The command line: dialoguer prompts, stdout.
+pub(crate) struct Terminal;
+
+impl Ui for Terminal {
+    fn say(&mut self, line: String) {
+        println!("{line}");
+    }
+
+    fn pick(&mut self, prompt: &str, items: &[String]) -> Result<usize, String> {
+        fuzzy(prompt, items)
+    }
+
+    fn confirm(&mut self, prompt: &str) -> Result<bool, String> {
+        confirm(prompt)
+    }
+
+    fn input(&mut self, prompt: &str) -> Result<String, String> {
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt(prompt)
+            .interact_text()
+            .map_err(err)
+    }
+
+    fn can_ask(&self) -> bool {
+        std::io::stdin().is_terminal()
+    }
+}
 
 pub(super) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -89,7 +131,7 @@ pub(super) fn list(items: &[String]) -> Value {
     Value::Sequence(items.iter().cloned().map(Value::String).collect())
 }
 
-pub(super) fn fuzzy(prompt: &str, items: &[String]) -> Result<usize, String> {
+fn fuzzy(prompt: &str, items: &[String]) -> Result<usize, String> {
     if !std::io::stdin().is_terminal() {
         return Err(format!(
             "{prompt}: needs a choice, but there is no terminal — pass an argument"
@@ -181,6 +223,7 @@ pub(super) fn resolve_task(
     config: &Config,
     mut tasks: Vec<Task>,
     arg: Option<&str>,
+    ui: &mut dyn Ui,
 ) -> Result<Task, String> {
     if let Some(arg) = arg {
         return match find_task(&tasks, arg, true)? {
@@ -199,7 +242,7 @@ pub(super) fn resolve_task(
         .iter()
         .map(|&i| table.tasks[i].task.name.clone())
         .collect();
-    let chosen = open[fuzzy("Task", &items)?];
+    let chosen = open[ui.pick("Task", &items)?];
     Ok(table.tasks.swap_remove(chosen).task)
 }
 
@@ -215,7 +258,11 @@ pub(super) fn tree_table(config: &Config, online: bool) -> Result<Table, String>
 
 /// A worktree by name or branch, otherwise the one containing the cwd, otherwise
 /// a picker. Index into `table.trees`.
-pub(super) fn resolve_tree(table: &Table, name: Option<String>) -> Result<usize, String> {
+pub(super) fn resolve_tree(
+    table: &Table,
+    name: Option<String>,
+    ui: &mut dyn Ui,
+) -> Result<usize, String> {
     let trees = &table.trees;
 
     if let Some(name) = name {
@@ -236,5 +283,5 @@ pub(super) fn resolve_tree(table: &Table, name: Option<String>) -> Result<usize,
         return Err("No linked worktrees".to_string());
     }
     let names: Vec<String> = trees.iter().map(|t| t.wt.name()).collect();
-    fuzzy("Worktree", &names)
+    ui.pick("Worktree", &names)
 }

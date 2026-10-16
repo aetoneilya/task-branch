@@ -64,58 +64,58 @@ enum CliCommands {
 // The arguments of the bigger commands, handed to them whole. No doc comments
 // on the structs: clap would take them for the commands' help.
 
-#[derive(Args, Debug)]
-struct StartArgs {
+#[derive(Args, Debug, Default)]
+pub(crate) struct StartArgs {
     /// Task name or ticket key; a picker when omitted
-    target: Option<String>,
+    pub(crate) target: Option<String>,
     /// Tickets of the new task, the first one gets the worktree
     #[arg(long = "ticket", short = 'k')]
-    tickets: Vec<String>,
+    pub(crate) tickets: Vec<String>,
     #[arg(long = "tag", short = 't')]
-    tags: Vec<String>,
+    pub(crate) tags: Vec<String>,
     /// The goal: first line of the note and the agent's brief
     #[arg(long, short = 'm')]
-    message: Option<String>,
+    pub(crate) message: Option<String>,
     /// Worktree, tab and agent name; default: from the ticket summary
     #[arg(long, short = 'n')]
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     /// Default: <branch_prefix><KEY>-<name>
     #[arg(long, short = 'b')]
-    branch: Option<String>,
+    pub(crate) branch: Option<String>,
     /// Don't switch to the new tab
     #[arg(long)]
-    bg: bool,
+    pub(crate) bg: bool,
 }
 
-#[derive(Args, Debug)]
-struct AddArgs {
+#[derive(Args, Debug, Default)]
+pub(crate) struct AddArgs {
     /// [<task>] <KEY>; the task defaults to the current one
     #[arg(num_args = 1..=2, required = true)]
-    args: Vec<String>,
+    pub(crate) args: Vec<String>,
     /// Run the agent in this existing worktree of the task (stacked MRs)
     #[arg(long = "in")]
-    in_tree: Option<String>,
+    pub(crate) in_tree: Option<String>,
     #[arg(long, short = 'n')]
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     #[arg(long, short = 'm')]
-    message: Option<String>,
+    pub(crate) message: Option<String>,
     #[arg(long)]
-    bg: bool,
+    pub(crate) bg: bool,
 }
 
-#[derive(Args, Debug)]
-struct SelectArgs {
+#[derive(Args, Debug, Default)]
+pub(crate) struct SelectArgs {
     /// Task name or ticket key; a picker when omitted
-    target: Option<String>,
+    pub(crate) target: Option<String>,
     /// That worktree of the task
     #[arg(long)]
-    tree: Option<String>,
+    pub(crate) tree: Option<String>,
     /// Pick which of the task's sessions to resume
     #[arg(long)]
-    session: bool,
+    pub(crate) session: bool,
     /// Don't switch to it
     #[arg(long)]
-    bg: bool,
+    pub(crate) bg: bool,
 }
 
 #[derive(Args, Debug)]

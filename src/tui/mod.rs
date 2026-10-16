@@ -1,8 +1,8 @@
 //! `wt` without a command: the task tree on the left, details of the selection on
 //! the right. The offline table (worktrees, agents, notes) renders at once; Jira
 //! and GitLab fill in from a background refresh, repeated every minute.
-//! Closing work checks, asks and reports in a dialog; other actions run the same
-//! `wt` commands, and interactive ones get the terminal for a while.
+//! Actions run the same commands as `wt` does, in the background: they report
+//! and ask in a dialog.
 
 mod details;
 mod dialog;
@@ -56,12 +56,17 @@ enum Update {
     Table(Box<Table>, Vec<String>),
     /// A lazily loaded detail.
     Detail(Detail, String),
-    Message(String),
     Agents(Vec<herdr::Agent>),
     /// A dialog's action checked, or why it can't be.
     Plan(Result<Action, String>),
-    /// A line of a running action's report.
+    /// A line of a running command's report.
     Said(String),
+    /// A running command's question: a pick of `items`, yes or no without them.
+    Ask {
+        prompt: String,
+        items: Vec<String>,
+        reply: Sender<Option<usize>>,
+    },
     Finished(Result<(), String>),
 }
 
@@ -244,9 +249,13 @@ impl App {
                 self.pending.remove(&detail);
                 self.details.insert(detail, text);
             }
-            Update::Message(text) => self.say(text),
             Update::Plan(plan) => self.on_plan(plan),
             Update::Said(line) => self.on_said(line),
+            Update::Ask {
+                prompt,
+                items,
+                reply,
+            } => self.on_ask(prompt, items, reply),
             Update::Finished(result) => self.on_finished(result),
             Update::Agents(agents) => {
                 self.agents_polling = false;

@@ -1,7 +1,8 @@
 //! `wt done` and `wt attach`: closing a task or worktrees, attaching a ticket.
 
 use super::common::{
-    confirm, err, find_task, fuzzy, is_ticket_key, list, resolve_task, resolve_tree, tree_table,
+    Terminal, Ui, confirm, err, find_task, is_ticket_key, list, resolve_task, resolve_tree,
+    tree_table,
 };
 use super::launch::close_herdr_views;
 use crate::cli::DoneArgs;
@@ -235,7 +236,7 @@ fn done_trees(config: &Config, args: DoneArgs) -> Result<(), String> {
     }
 
     if !args.merged {
-        let tree = resolve_tree(&table, args.name)?;
+        let tree = resolve_tree(&table, args.name, &mut Terminal)?;
         let plan = TreePlan::new(table, tree, args.force)?;
         if !plan.blockers.is_empty() {
             return Err(not_finished(&plan.name(), &plan.blockers));
@@ -448,12 +449,21 @@ fn closing_transition(transitions: &[Transition]) -> Option<&Transition> {
         .copied()
 }
 
-/// `wt attach <KEY> [<task>]`: the ticket joins a task — just its `tickets:`,
-/// no worktree or agent. Without a task, a picker over the open ones.
 pub(in crate::cli) fn cli_attach(
     config: &Config,
     key: &str,
     task: Option<String>,
+) -> Result<(), String> {
+    attach(config, key, task, &mut Terminal)
+}
+
+/// `wt attach <KEY> [<task>]`: the ticket joins a task — just its `tickets:`,
+/// no worktree or agent. Without a task, a picker over the open ones.
+pub(crate) fn attach(
+    config: &Config,
+    key: &str,
+    task: Option<String>,
+    ui: &mut dyn Ui,
 ) -> Result<(), String> {
     if !is_ticket_key(key) {
         return Err(format!("\"{key}\" is not a ticket key"));
@@ -463,7 +473,7 @@ pub(in crate::cli) fn cli_attach(
         return Err(format!("{key} is already in \"{}\"", tasks[i].name));
     }
     let mut task = match task {
-        Some(name) => resolve_task(config, tasks, Some(&name))?,
+        Some(name) => resolve_task(config, tasks, Some(&name), ui)?,
         None => {
             let mut table = table::build(config, tasks, false);
             let open: Vec<usize> = (0..table.tasks.len())
@@ -473,7 +483,7 @@ pub(in crate::cli) fn cli_attach(
                 .iter()
                 .map(|&i| table.tasks[i].task.name.clone())
                 .collect();
-            let chosen = open[fuzzy(&format!("Attach {key} to"), &items)?];
+            let chosen = open[ui.pick(&format!("Attach {key} to"), &items)?];
             table.tasks.swap_remove(chosen).task
         }
     };
@@ -483,7 +493,7 @@ pub(in crate::cli) fn cli_attach(
     entries.push(key.to_string());
     task.note.set("tickets", list(&entries));
     task.note.save().map_err(err)?;
-    println!("{key} attached to \"{}\"", task.name);
+    ui.say(format!("{key} attached to \"{}\"", task.name));
     Ok(())
 }
 

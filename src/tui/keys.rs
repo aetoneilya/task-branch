@@ -1,6 +1,9 @@
 //! Key handling and the actions behind the keys.
 
-use super::{App, Prompt, Update, rows::Kind};
+use super::dialog::Then;
+use super::{App, Prompt, rows::Kind};
+use crate::cli::work;
+use crate::cli::{AddArgs, SelectArgs, StartArgs};
 use crate::client::herdr;
 use crate::table::Table;
 use ratatui::DefaultTerminal;
@@ -15,7 +18,7 @@ impl App {
             return;
         }
         if self.prompt.is_some() {
-            self.on_prompt_key(key, terminal);
+            self.on_prompt_key(key);
             return;
         }
         if self.help {
@@ -73,27 +76,35 @@ impl App {
             KeyCode::Char('a') => match self.current().map(|r| r.kind.clone()) {
                 Some(Kind::Loose(i)) => {
                     let key = self.table.loose[i].key.clone();
-                    self.run_wt(terminal, &["attach", &key]);
+                    self.run_command(format!("attach {key}"), Then::Close, move |config, ui| {
+                        work::done::attach(config, &key, None, ui)
+                    });
                 }
                 _ => self.say("a works on a ticket without a task"),
             },
             KeyCode::Char('p') => self.preview = Some(!self.preview_shown),
-            KeyCode::Enter => self.go(terminal),
+            KeyCode::Enter => self.go(),
             KeyCode::Char('b') => self.open_in_browser(),
             KeyCode::Char('i') => self.open_in_ide(),
             KeyCode::Char('o') => self.open_note_in_obsidian(),
             KeyCode::Char('e') => self.edit_note(terminal),
-            KeyCode::Char('s') => self.start(terminal),
+            KeyCode::Char('s') => self.start(),
             KeyCode::Char('n') => self.prompt = Some((Prompt::NewTask, String::new())),
             KeyCode::Char('c') => {
                 if let Some(target) = self.target() {
-                    self.run_wt(terminal, &["select", &target, "--session"]);
+                    self.select_work(SelectArgs {
+                        target: Some(target),
+                        session: true,
+                        ..SelectArgs::default()
+                    });
                 }
             }
             KeyCode::Char('R') => {
                 if let Some(t) = self.tree() {
                     let name = self.table.tree(t).wt.name();
-                    self.run_wt(terminal, &["review", &name]);
+                    self.run_command(format!("review {name}"), Then::Close, move |config, ui| {
+                        work::review(config, Some(name), ui)
+                    });
                 }
             }
             KeyCode::Char('d') => match self.current().map(|r| r.kind.clone()) {
@@ -107,14 +118,13 @@ impl App {
         }
     }
 
-    fn on_prompt_key(&mut self, key: KeyEvent, terminal: &mut DefaultTerminal) {
+    fn on_prompt_key(&mut self, key: KeyEvent) {
         let Some((prompt, mut text)) = self.prompt.take() else {
             return;
         };
         if let Prompt::StartTicket(ticket) = &prompt {
             if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
-                let ticket = ticket.clone();
-                self.run_wt(terminal, &["start", &ticket]);
+                self.start_work(ticket.clone());
             }
             return;
         }
@@ -132,7 +142,17 @@ impl App {
                     Prompt::AddTicket(task) => {
                         let key = text.trim().to_uppercase();
                         if !key.is_empty() {
-                            self.run_wt(terminal, &["add", &task, &key]);
+                            self.run_command(
+                                format!("add {key} to \"{task}\""),
+                                Then::Navigate,
+                                move |config, ui| {
+                                    let args = AddArgs {
+                                        args: vec![task, key],
+                                        ..AddArgs::default()
+                                    };
+                                    work::add(config, args, ui)
+                                },
+                            );
                         }
                     }
                     Prompt::NoteLine(path) => {
@@ -151,7 +171,7 @@ impl App {
                     }
                     Prompt::NewTask => {
                         if !text.trim().is_empty() {
-                            self.run_wt(terminal, &["start", text.trim()]);
+                            self.start_work(text.trim().to_string());
                         }
                     }
                 }
@@ -244,7 +264,7 @@ impl App {
 
     /// ⏎: to the agent of the selection — focus a live one, otherwise `wt select`
     /// resumes or starts claude there; an MR opens in the browser.
-    fn go(&mut self, terminal: &mut DefaultTerminal) {
+    fn go(&mut self) {
         let Some(row) = self.current() else { return };
         match row.kind.clone() {
             Kind::Agent(t, a) => self.focus(&agent_name(&self.table, t, a)),
@@ -258,22 +278,17 @@ impl App {
                     self.say("worktree without a ticket: wt add to attach it");
                     return;
                 };
-                let args = vec![
-                    "select".to_string(),
-                    target,
-                    "--tree".to_string(),
-                    tree.wt.name(),
-                ];
-                if self.popup {
-                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                    self.run_wt(terminal, &args);
-                } else {
-                    self.say(format!("opening {}…", tree.wt.name()));
-                    self.run_wt_background(args);
-                }
+                self.select_work(SelectArgs {
+                    target: Some(target),
+                    tree: Some(tree.wt.name()),
+                    ..SelectArgs::default()
+                });
             }
             Kind::Mr(_) => self.open_in_browser(),
-            Kind::Ticket(key) => self.run_wt(terminal, &["select", &key]),
+            Kind::Ticket(key) => self.select_work(SelectArgs {
+                target: Some(key),
+                ..SelectArgs::default()
+            }),
             Kind::Header(_) => {}
             // nothing `wt select` can get back to yet: no worktree, no open MR
             Kind::Loose(i) if self.table.loose[i].state.is_none() => {
@@ -282,10 +297,36 @@ impl App {
             }
             Kind::Task(_) | Kind::Loose(_) => {
                 if let Some(target) = self.target() {
-                    self.run_wt(terminal, &["select", &target]);
+                    self.select_work(SelectArgs {
+                        target: Some(target),
+                        ..SelectArgs::default()
+                    });
                 }
             }
         }
+    }
+
+    /// `wt select`: back to the work, picking in the dialog what it asks.
+    fn select_work(&mut self, args: SelectArgs) {
+        let title = format!("select {}", args.target.as_deref().unwrap_or(""));
+        self.run_command(title, Then::Navigate, move |config, ui| {
+            work::select(config, args, ui)
+        });
+    }
+
+    /// `wt start <target>`: a task with its worktree tab and agent.
+    fn start_work(&mut self, target: String) {
+        self.run_command(
+            format!("start {target}"),
+            Then::Navigate,
+            move |config, ui| {
+                let args = StartArgs {
+                    target: Some(target),
+                    ..StartArgs::default()
+                };
+                work::start(config, args, ui)
+            },
+        );
     }
 
     fn focus(&mut self, agent: &str) {
@@ -377,14 +418,11 @@ impl App {
 
     /// `s`: a ticket gets its worktree (`wt start KEY` adds it to its task); on a
     /// task, asks which ticket to add.
-    fn start(&mut self, terminal: &mut DefaultTerminal) {
+    fn start(&mut self) {
         let Some(row) = self.current() else { return };
         match row.kind.clone() {
-            Kind::Ticket(key) => self.run_wt(terminal, &["start", &key]),
-            Kind::Loose(i) => {
-                let key = self.table.loose[i].key.clone();
-                self.run_wt(terminal, &["start", &key]);
-            }
+            Kind::Ticket(key) => self.start_work(key),
+            Kind::Loose(i) => self.start_work(self.table.loose[i].key.clone()),
             _ => match row.root.clone() {
                 Kind::Task(i) => {
                     let task = self.table.tasks[i].task.name.clone();
@@ -393,60 +431,6 @@ impl App {
                 _ => self.say("s works on a task or a ticket"),
             },
         }
-    }
-
-    /// Runs `wt <args>` with the terminal handed over: commands that may ask.
-    fn run_wt(&mut self, terminal: &mut DefaultTerminal, args: &[&str]) {
-        let Ok(exe) = std::env::current_exe() else {
-            return;
-        };
-        ratatui::restore();
-        println!("$ wt {}\n", args.join(" "));
-        let ok = Command::new(exe)
-            .args(args)
-            .status()
-            .is_ok_and(|s| s.success());
-        // as a popup, work that was opened is where to be now; errors stay readable
-        let navigates = matches!(args.first(), Some(&"select" | &"start" | &"add"));
-        if ok && navigates && self.popup {
-            self.quit = true;
-            return;
-        }
-        println!("\n⏎ back to wt");
-        let _ = std::io::stdin().read_line(&mut String::new());
-        *terminal = ratatui::init();
-        self.say(format!(
-            "wt {}: {}",
-            args.join(" "),
-            if ok { "done" } else { "failed" }
-        ));
-        self.refresh();
-    }
-
-    /// Runs `wt <args>` that asks nothing, reporting its last line.
-    fn run_wt_background(&mut self, args: Vec<String>) {
-        let Ok(exe) = std::env::current_exe() else {
-            return;
-        };
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let text = match Command::new(exe).args(&args).output() {
-                Ok(out) => {
-                    let stream = if out.status.success() {
-                        out.stdout
-                    } else {
-                        out.stderr
-                    };
-                    String::from_utf8_lossy(&stream)
-                        .lines()
-                        .last()
-                        .unwrap_or("")
-                        .to_string()
-                }
-                Err(e) => format!("! {e}"),
-            };
-            let _ = tx.send(Update::Message(text));
-        });
     }
 }
 

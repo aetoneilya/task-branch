@@ -2,7 +2,7 @@
 
 use super::brief::brief_text;
 use super::common::{
-    branch_name, confirm, current_repo, err, fetch_issue, find_task, fuzzy, is_ticket_key, list,
+    Terminal, Ui, branch_name, current_repo, err, fetch_issue, find_task, is_ticket_key, list,
     name_from_issue, name_from_text, resolve_task,
 };
 use super::launch::open_work;
@@ -12,31 +12,37 @@ use crate::client::worktree;
 use crate::config::Config;
 use crate::vault::note::Note;
 use crate::vault::task::{Task, ticket_keys, vault_config};
-use dialoguer::Input;
-use dialoguer::theme::ColorfulTheme;
 use serde_yaml::Value;
-use std::io::IsTerminal;
 
 /// `wt start <task name | KEY>`: a new task (note, herdr workspace, worktree tab
 /// with claude), or work on a ticket without a note.
 pub(in crate::cli) fn cli_start(config: &Config, args: StartArgs) -> Result<(), String> {
-    start(config, load(config)?, args)
+    start(config, args, &mut Terminal)
 }
 
-fn start(config: &Config, tasks: Vec<Task>, mut args: StartArgs) -> Result<(), String> {
+pub(crate) fn start(config: &Config, args: StartArgs, ui: &mut dyn Ui) -> Result<(), String> {
+    start_with(config, load(config)?, args, ui)
+}
+
+fn start_with(
+    config: &Config,
+    tasks: Vec<Task>,
+    mut args: StartArgs,
+    ui: &mut dyn Ui,
+) -> Result<(), String> {
     let target = match args.target.take() {
         Some(target) => target,
-        None => pick_start_target(config, &tasks)?,
+        None => pick_start_target(config, &tasks, ui)?,
     };
     let existing = find_task(&tasks, &target, false)?;
 
     if is_ticket_key(&target) {
         if let Some(i) = existing {
             let task = &tasks[i];
-            println!(
+            ui.say(format!(
                 "{target} is already in task \"{}\" — adding it there",
                 task.name
-            );
+            ));
             let add_args = AddArgs {
                 args: vec![task.name.clone(), target],
                 in_tree: None,
@@ -44,7 +50,7 @@ fn start(config: &Config, tasks: Vec<Task>, mut args: StartArgs) -> Result<(), S
                 message: args.message,
                 bg: args.bg,
             };
-            return add(config, tasks, add_args);
+            return add_with(config, tasks, add_args, ui);
         }
         // work always gets a task: a note for shared context and agents' findings,
         // named after the ticket
@@ -60,7 +66,7 @@ fn start(config: &Config, tasks: Vec<Task>, mut args: StartArgs) -> Result<(), S
             tickets: keys,
             ..args
         };
-        return start(config, tasks, args);
+        return start_with(config, tasks, args, ui);
     }
 
     if let Some(i) = existing {
@@ -79,9 +85,9 @@ fn start(config: &Config, tasks: Vec<Task>, mut args: StartArgs) -> Result<(), S
         ..
     } = args;
     let similar = similar_tasks(&tasks, &target, &tags);
-    if !similar.is_empty() && std::io::stdin().is_terminal() {
-        println!("similar tasks: {}", similar.join(", "));
-        if !confirm("Create a new one anyway?")? {
+    if !similar.is_empty() && ui.can_ask() {
+        ui.say(format!("similar tasks: {}", similar.join(", ")));
+        if !ui.confirm("Create a new one anyway?")? {
             return Err("not created: wt select / wt add if it is one of them".to_string());
         }
     }
@@ -116,7 +122,7 @@ fn start(config: &Config, tasks: Vec<Task>, mut args: StartArgs) -> Result<(), S
         .unwrap_or_default();
     let note = Note::create(&path, &frontmatter, &body).map_err(err)?;
     let task = Task::from_note(note);
-    println!("note: {}", path.display());
+    ui.say(format!("note: {}", path.display()));
 
     let tree = worktree::worktree_dir(&main, &wt_name);
     let brief = brief_text(
@@ -127,24 +133,25 @@ fn start(config: &Config, tasks: Vec<Task>, mut args: StartArgs) -> Result<(), S
         &keys,
         message.as_deref(),
     );
-    open_work(
-        &task.name,
-        &main,
-        &wt_name,
-        &branch,
-        brief,
-        Some(&task.note.path),
-        !bg,
-    )
+    open_work(&task, &main, &wt_name, &branch, brief, !bg, ui)
 }
 
 /// `wt add [<task>] <KEY>`: the ticket joins the task and gets a tab in the
 /// task's herdr workspace, in a new worktree or `--in` one the task has.
 pub(in crate::cli) fn cli_add(config: &Config, args: AddArgs) -> Result<(), String> {
-    add(config, load(config)?, args)
+    add(config, args, &mut Terminal)
 }
 
-fn add(config: &Config, tasks: Vec<Task>, args: AddArgs) -> Result<(), String> {
+pub(crate) fn add(config: &Config, args: AddArgs, ui: &mut dyn Ui) -> Result<(), String> {
+    add_with(config, load(config)?, args, ui)
+}
+
+fn add_with(
+    config: &Config,
+    tasks: Vec<Task>,
+    args: AddArgs,
+    ui: &mut dyn Ui,
+) -> Result<(), String> {
     let AddArgs {
         args,
         in_tree,
@@ -162,14 +169,14 @@ fn add(config: &Config, tasks: Vec<Task>, args: AddArgs) -> Result<(), String> {
             "\"{key}\" is not a ticket key: wt add [<task>] <KEY>"
         ));
     }
-    let mut task = resolve_task(config, tasks, task_arg.as_deref())?;
+    let mut task = resolve_task(config, tasks, task_arg.as_deref(), ui)?;
 
     if !task.tickets.contains(&key) {
         let _lock = crate::vault::lock().map_err(err)?;
         task.tickets.push(key.clone());
         task.note.set("tickets", list(&task.tickets));
         task.note.save().map_err(err)?;
-        println!("{key} added to \"{}\"", task.name);
+        ui.say(format!("{key} added to \"{}\"", task.name));
     }
 
     let issue = fetch_issue(config, &key)?;
@@ -197,19 +204,11 @@ fn add(config: &Config, tasks: Vec<Task>, args: AddArgs) -> Result<(), String> {
         &task.tickets,
         message.as_deref(),
     );
-    open_work(
-        &task.name,
-        &main,
-        &wt_name,
-        &branch,
-        brief,
-        Some(&task.note.path),
-        !bg,
-    )
+    open_work(&task, &main, &wt_name, &branch, brief, !bg, ui)
 }
 
 /// My open Jira tickets that belong to no task, plus "new task…".
-fn pick_start_target(config: &Config, tasks: &[Task]) -> Result<String, String> {
+fn pick_start_target(config: &Config, tasks: &[Task], ui: &mut dyn Ui) -> Result<String, String> {
     let client = JiraClient::from_env(&config.jira.host)?;
     let issues = client
         .search_issues_brief(
@@ -226,11 +225,8 @@ fn pick_start_target(config: &Config, tasks: &[Task]) -> Result<String, String> 
         free.iter()
             .map(|i| format!("{}  {}", i.key, i.fields.summary)),
     );
-    match fuzzy("Start", &items)? {
-        0 => Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Task name")
-            .interact_text()
-            .map_err(err),
+    match ui.pick("Start", &items)? {
+        0 => ui.input("Task name"),
         i => Ok(free[i - 1].key.clone()),
     }
 }

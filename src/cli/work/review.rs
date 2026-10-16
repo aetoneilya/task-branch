@@ -1,6 +1,6 @@
 //! `wt review`: a reviewer agent next to the task's agent.
 
-use super::common::{err, resolve_tree, tree_table};
+use super::common::{Terminal, Ui, err, resolve_tree, tree_table};
 use super::launch::live_agents;
 use crate::client::herdr;
 use crate::config::Config;
@@ -13,12 +13,17 @@ List findings, most severe first: file:line, the problem, a scenario where it br
 If there are none, say so.";
 
 pub(in crate::cli) fn cli_review(config: &Config, name: Option<String>) -> Result<(), String> {
+    review(config, name, &mut Terminal)
+}
+
+/// A reviewer claude on the worktree, under the task's agent or in a tab of its own.
+pub(crate) fn review(config: &Config, name: Option<String>, ui: &mut dyn Ui) -> Result<(), String> {
     if !herdr::available() {
         return Err("wt review needs herdr: run it inside a herdr pane".to_string());
     }
     // worktrees and agents only: nothing here needs Jira or GitLab
     let table = tree_table(config, false)?;
-    let wt = &table.tree(resolve_tree(&table, name)?).wt;
+    let wt = &table.tree(resolve_tree(&table, name, ui)?).wt;
 
     let task_agent = live_agents().into_iter().find(|a| a.runs_in(&wt.path));
     let pane = match &task_agent {
@@ -39,6 +44,6 @@ pub(in crate::cli) fn cli_review(config: &Config, name: Option<String>) -> Resul
     args.push(REVIEW_PROMPT);
     herdr::start_claude(&reviewer, &pane, &args).map_err(err)?;
 
-    println!("Started {reviewer} in {}", wt.path.display());
+    ui.say(format!("Started {reviewer} in {}", wt.path.display()));
     Ok(())
 }

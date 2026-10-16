@@ -2,10 +2,11 @@
 //! `wt prepare`.
 
 use super::brief::{agent_prompt, write_brief};
-use super::common::{err, same_name};
+use super::common::{Ui, err, same_name};
 use crate::cli::progress;
 use crate::client::herdr::shell_quote;
 use crate::client::{herdr, worktree};
+use crate::vault::task::Task;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -19,10 +20,11 @@ pub(super) fn launch(
     note: Option<&Path>,
     brief: &Path,
     focus: bool,
+    ui: &mut dyn Ui,
 ) -> Result<(), String> {
     let prompt = agent_prompt(note, brief);
     let args: Vec<&str> = prompt.as_deref().into_iter().collect();
-    open_agent(space, cwd, label, &args, focus)
+    open_agent(space, cwd, label, &args, focus, ui)
 }
 
 /// What `wt prepare` does in the new tab, handed over in a file.
@@ -37,30 +39,31 @@ struct PrepareSpec {
     agent: String,
 }
 
-/// A tab for the worktree `name` in the herdr workspace `space`. Fetch and
+/// A tab for the worktree `name` in the task's herdr workspace. Fetch and
 /// checkout of a big repo take half a minute, so they run in the tab itself:
 /// `wt prepare` shows the progress there and writes the brief, then the shell
 /// cds into the worktree and starts claude,
 /// and `wt start` returns at once. Without herdr it all happens here.
 pub(super) fn open_work(
-    space: &str,
+    task: &Task,
     main: &Path,
     name: &str,
     branch: &str,
     brief: String,
-    note: Option<&Path>,
     focus: bool,
+    ui: &mut dyn Ui,
 ) -> Result<(), String> {
+    let (space, note) = (task.name.as_str(), Some(task.note.path.as_path()));
     let dir = worktree::worktree_dir(main, name);
     if !herdr::available() {
         let dir = worktree::create_worktree(main, name, branch).map_err(err)?;
-        println!("worktree: {} ({branch})", dir.display());
+        ui.say(format!("worktree: {} ({branch})", dir.display()));
         let brief = write_brief(&dir, &brief)?;
         let prompt = agent_prompt(note, &brief).unwrap_or_default();
-        println!(
+        ui.say(format!(
             "not in herdr — run it yourself: cd {} && claude '{prompt}'",
             dir.display()
-        );
+        ));
         return Ok(());
     }
 
@@ -96,9 +99,9 @@ pub(super) fn open_work(
     if focus {
         let _ = herdr::focus_tab(&tab);
     }
-    println!(
+    ui.say(format!(
         "tab {name} → workspace \"{space}\": the worktree ({branch}) is being prepared there, then claude {agent} starts"
-    );
+    ));
     Ok(())
 }
 
@@ -155,13 +158,14 @@ pub(super) fn open_agent(
     label: &str,
     claude_args: &[&str],
     focus: bool,
+    ui: &mut dyn Ui,
 ) -> Result<(), String> {
     if !herdr::available() {
-        println!(
+        ui.say(format!(
             "not in herdr — run it yourself: cd {} && claude {}",
             cwd.display(),
             claude_args.join(" ")
-        );
+        ));
         return Ok(());
     }
     let (tab, pane) = open_tab(space, cwd, label)?;
@@ -170,7 +174,9 @@ pub(super) fn open_agent(
     if focus {
         let _ = herdr::focus_tab(&tab);
     }
-    println!("agent {agent} → workspace \"{space}\", tab {label}");
+    ui.say(format!(
+        "agent {agent} → workspace \"{space}\", tab {label}"
+    ));
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 //! `wt select`: back to existing work, focusing its agent or resuming its session.
 
 use super::brief::brief_path;
-use super::common::{current_repo, err, find_task, fuzzy, is_ticket_key};
+use super::common::{Terminal, Ui, current_repo, err, find_task, is_ticket_key};
 use super::launch::{launch, open_agent};
 use crate::cli::SelectArgs;
 use crate::cli::load;
@@ -22,6 +22,10 @@ enum Work {
 /// claude in its worktree resuming the last session, restoring the worktree if
 /// it was removed.
 pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<(), String> {
+    select(config, args, &mut Terminal)
+}
+
+pub(crate) fn select(config: &Config, args: SelectArgs, ui: &mut dyn Ui) -> Result<(), String> {
     let SelectArgs {
         target,
         tree: tree_name,
@@ -34,7 +38,7 @@ pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<()
         Some(target) => {
             find_work(&table, &target)?.ok_or_else(|| format!("no task or ticket \"{target}\""))?
         }
-        None => pick_work(&table)?,
+        None => pick_work(&table, ui)?,
     };
     let (space, trees, row) = match work {
         Work::Task(i) => {
@@ -68,9 +72,9 @@ pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<()
             .iter()
             .map(|s| format!("{}  {}  {}", s.date, s.worktree, &s.id[..8.min(s.id.len())]))
             .collect();
-        let chosen = &sessions[fuzzy("Session", &items)?];
-        let tree = restore_worktree(config, row, &chosen.worktree)?;
-        return resume(&table, &space, chosen, &tree, note, bg);
+        let chosen = &sessions[ui.pick("Session", &items)?];
+        let tree = restore_worktree(config, row, &chosen.worktree, ui)?;
+        return resume(&table, &space, chosen, &tree, note, bg, ui);
     }
 
     if trees.is_empty() {
@@ -79,8 +83,8 @@ pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<()
                 "\"{space}\" has neither worktrees nor sessions: wt add \"{space}\" <KEY>"
             ));
         };
-        let tree = restore_worktree(config, row, &last.worktree)?;
-        return resume(&table, &space, last, &tree, note, bg);
+        let tree = restore_worktree(config, row, &last.worktree, ui)?;
+        return resume(&table, &space, last, &tree, note, bg, ui);
     }
 
     let mut trees = trees;
@@ -112,21 +116,29 @@ pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<()
                 format!("{}  {}", t.wt.name(), agents.join(", "))
             })
             .collect();
-        table.tree(trees[fuzzy("Worktree", &items)?])
+        table.tree(trees[ui.pick("Worktree", &items)?])
     };
 
     if let Some(agent) = tree.agents.first().map(|a| a.name.as_str()) {
         if !bg {
             herdr::focus_agent(agent).map_err(err)?;
         }
-        println!("→ {agent}");
+        ui.say(format!("→ {agent}"));
         return Ok(());
     }
     if let Some(last) = sessions.iter().find(|s| s.worktree == tree.wt.name()) {
-        return resume(&table, &space, last, &tree.wt.path, note, bg);
+        return resume(&table, &space, last, &tree.wt.path, note, bg, ui);
     }
     let brief = brief_path(&tree.wt.path)?;
-    launch(&space, &tree.wt.path, &tree.wt.name(), note, &brief, !bg)
+    launch(
+        &space,
+        &tree.wt.path,
+        &tree.wt.name(),
+        note,
+        &brief,
+        !bg,
+        ui,
+    )
 }
 
 /// Newest first: by date, and sessions of one day by their transcript's last
@@ -150,6 +162,7 @@ fn resume(
     tree: &Path,
     note: Option<&Path>,
     bg: bool,
+    ui: &mut dyn Ui,
 ) -> Result<(), String> {
     // a session still open in an agent: a second claude on it would interleave
     // two conversations in one transcript
@@ -162,16 +175,16 @@ fn resume(
         if !bg {
             herdr::focus_agent(&agent.pane_id).map_err(err)?;
         }
-        println!("the session is open in agent {name} → {name}");
+        ui.say(format!("the session is open in agent {name} → {name}"));
         return Ok(());
     }
     let Some(transcript) = table.sessions.get(&session.id) else {
-        println!(
+        ui.say(format!(
             "Claude Code has already deleted conversation {} — starting a new session",
             session.id
-        );
+        ));
         let brief = brief_path(tree)?;
-        return launch(space, tree, &session.worktree, note, &brief, !bg);
+        return launch(space, tree, &session.worktree, note, &brief, !bg, ui);
     };
     let launch_dir = transcript
         .first_cwd
@@ -185,12 +198,18 @@ fn resume(
         &session.worktree,
         &["--resume", &session.id],
         !bg,
+        ui,
     )
 }
 
 /// The worktree directory, recreated at the same path from its branch if it was
 /// removed: sessions are keyed by directory.
-fn restore_worktree(config: &Config, row: Option<&TaskRow>, name: &str) -> Result<PathBuf, String> {
+fn restore_worktree(
+    config: &Config,
+    row: Option<&TaskRow>,
+    name: &str,
+    ui: &mut dyn Ui,
+) -> Result<PathBuf, String> {
     let main = current_repo(config)?;
     let dir = worktree::worktree_dir(&main, name);
     if dir.exists() {
@@ -210,10 +229,10 @@ fn restore_worktree(config: &Config, row: Option<&TaskRow>, name: &str) -> Resul
             ));
         }
         [only] => only.clone(),
-        many => many[fuzzy("Worktree branch", many)?].clone(),
+        many => many[ui.pick("Worktree branch", many)?].clone(),
     };
     let dir = worktree::create_worktree(&main, name, &branch).map_err(err)?;
-    println!("restored worktree {} ({branch})", dir.display());
+    ui.say(format!("restored worktree {} ({branch})", dir.display()));
     Ok(dir)
 }
 
@@ -230,7 +249,7 @@ fn find_work(table: &Table, target: &str) -> Result<Option<Work>, String> {
 }
 
 /// Open tasks, then tickets without a task that have worktrees; agents first.
-fn pick_work(table: &Table) -> Result<Work, String> {
+fn pick_work(table: &Table, ui: &mut dyn Ui) -> Result<Work, String> {
     let mut items: Vec<(String, Work, bool)> = Vec::new();
     for (i, row) in table.tasks.iter().enumerate().filter(|(_, r)| !r.task.done) {
         let agents: Vec<&table::Agent> = row
@@ -276,7 +295,7 @@ fn pick_work(table: &Table) -> Result<Work, String> {
         return Err("no open tasks: wt start <name>".to_string());
     }
     let labels: Vec<String> = items.iter().map(|(l, _, _)| l.clone()).collect();
-    let chosen = fuzzy("Back to", &labels)?;
+    let chosen = ui.pick("Back to", &labels)?;
     Ok(items.swap_remove(chosen).1)
 }
 

@@ -283,7 +283,8 @@ MRs show draft, pipeline (`ci✓` `ci✗` `ci…`), approvals (`✔2`), unresolv
 threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 
 - **Rows**: task → its tickets → MRs without a worktree; the task's worktrees →
-  the MR of their branch, agents. Tasks go by state (active, review, idea,
+  the MR of their branch, agents; then agents of the task's herdr workspace
+  that work in none of the worktrees (say, in the main checkout). Tasks go by state (active, review, idea,
   finished), newest first by when the note entered the vault's git history.
   Below a `no task` title: tickets without a task that have a worktree or an open
   MR, and worktrees without a ticket. Below `assigned to me in Jira`: my open

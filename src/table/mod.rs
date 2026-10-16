@@ -126,7 +126,7 @@ impl AgentStatus {
     }
 }
 
-/// A herdr agent working in a worktree.
+/// A herdr agent working in a worktree, or in its task's workspace outside any.
 #[derive(Debug, Clone)]
 pub struct Agent {
     /// Its herdr name, or the pane id when it has none.
@@ -188,6 +188,9 @@ pub struct TaskRow {
     pub new_sessions: Vec<SessionRef>,
     /// The task's herdr workspace: the one labelled with the task name.
     pub space: Option<String>,
+    /// Agents of that workspace that work in none of the worktrees, say in the
+    /// main checkout.
+    pub agents: Vec<Agent>,
     /// None when Jira or GitLab did not answer.
     pub state: Option<TaskState>,
 }
@@ -340,6 +343,17 @@ impl Table {
     pub fn update_agents(&mut self, agents: &[herdr::Agent]) {
         for tree in &mut self.trees {
             tree.agents = matching::agents_in(&tree.wt.path, agents, &self.sessions);
+        }
+        for row in &mut self.tasks {
+            row.agents = matching::agents_outside(row.space.as_deref(), agents, &self.trees);
+        }
+    }
+
+    /// The agent an agent row shows.
+    pub fn agent(&self, at: view::AgentAt, agent: usize) -> &Agent {
+        match at {
+            view::AgentAt::Tree(t) => &self.trees[t].agents[agent],
+            view::AgentAt::Task(i) => &self.tasks[i].agents[agent],
         }
     }
 

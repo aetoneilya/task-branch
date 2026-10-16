@@ -219,7 +219,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, r)| match r.kind {
-                Kind::Agent(t, a) => self.table.tree(t).agents[a].status.waiting(),
+                Kind::Agent(at, a) => self.table.agent(at, a).status.waiting(),
                 _ => false,
             })
             .map(|(i, _)| i)

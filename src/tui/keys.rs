@@ -1,11 +1,13 @@
 //! Key handling and the actions behind the keys.
 
 use super::dialog::Then;
-use super::{App, Prompt, rows::Kind};
+use super::{
+    App, Prompt,
+    rows::{AgentAt, Kind},
+};
 use crate::cli::work;
 use crate::cli::{AddArgs, SelectArgs, StartArgs};
 use crate::client::herdr;
-use crate::table::Table;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
@@ -240,7 +242,7 @@ impl App {
 
     fn tree(&self) -> Option<usize> {
         match self.current()?.kind {
-            Kind::Tree(t) | Kind::Agent(t, _) => Some(t),
+            Kind::Tree(t) | Kind::Agent(AgentAt::Tree(t), _) => Some(t),
             _ => None,
         }
     }
@@ -251,7 +253,7 @@ impl App {
             Kind::Ticket(key) => Some(table.ticket_url(key)),
             Kind::Loose(i) => Some(table.ticket_url(&table.loose[*i].key)),
             Kind::Mr(m) => Some(table.mr(*m).mr.web_url().to_string()),
-            Kind::Tree(t) | Kind::Agent(t, _) => {
+            Kind::Tree(t) | Kind::Agent(AgentAt::Tree(t), _) => {
                 let tree = table.tree(*t);
                 match (tree.mr, tree.keys.first()) {
                     (Some(m), _) => Some(table.mr(m).mr.web_url().to_string()),
@@ -259,7 +261,7 @@ impl App {
                     _ => None,
                 }
             }
-            Kind::Task(_) | Kind::Header(_) => None,
+            Kind::Task(_) | Kind::Agent(AgentAt::Task(_), _) | Kind::Header(_) => None,
         }
     }
 
@@ -268,11 +270,11 @@ impl App {
     fn go(&mut self) {
         let Some(row) = self.current() else { return };
         match row.kind.clone() {
-            Kind::Agent(t, a) => self.focus(&agent_name(&self.table, t, a)),
+            Kind::Agent(at, a) => self.focus(&self.table.agent(at, a).name.clone()),
             Kind::Tree(t) => {
                 let tree = self.table.tree(t);
                 if !tree.agents.is_empty() {
-                    self.focus(&agent_name(&self.table, t, 0));
+                    self.focus(&tree.agents[0].name.clone());
                     return;
                 }
                 let Some(target) = self.target() else {
@@ -433,11 +435,6 @@ impl App {
             },
         }
     }
-}
-
-/// The herdr name of a worktree's agent.
-fn agent_name(table: &Table, tree: usize, agent: usize) -> String {
-    table.tree(tree).agents[agent].name.clone()
 }
 
 /// Appends `- line` to the note's own text under the notes lock, rereading it

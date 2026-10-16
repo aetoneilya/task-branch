@@ -2,7 +2,7 @@
 
 use super::{
     App, Update,
-    rows::{self, Kind, dim, spans},
+    rows::{self, AgentAt, Kind, dim, spans},
 };
 use crate::client::jira::JiraClient;
 use crate::client::{herdr, worktree};
@@ -43,7 +43,7 @@ impl App {
                     branch: wt.branch.clone(),
                 })
             }
-            Kind::Agent(t, a) => Some(Detail::Screen(table.tree(*t).agents[*a].pane.clone())),
+            Kind::Agent(at, a) => Some(Detail::Screen(table.agent(*at, *a).pane.clone())),
             _ => None,
         }
     }
@@ -164,10 +164,16 @@ impl App {
                 }
             }
             Kind::Header(_) => {}
-            Kind::Agent(t, a) => {
-                let tree = table.tree(*t);
-                lines.push(Line::from(rows::agent_spans(&tree.agents[*a], Tone::Bold)));
-                lines.push(Line::from(dim(format!("in {}", tree.wt.name()))));
+            Kind::Agent(at, a) => {
+                lines.push(Line::from(rows::agent_spans(
+                    table.agent(*at, *a),
+                    Tone::Bold,
+                )));
+                let place = match at {
+                    AgentAt::Tree(t) => format!("in {}", table.tree(*t).wt.name()),
+                    AgentAt::Task(_) => "in none of the task's worktrees".to_string(),
+                };
+                lines.push(Line::from(dim(place)));
             }
         }
         if let Some(detail) = self.detail(&row.kind) {

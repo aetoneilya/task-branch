@@ -1,6 +1,7 @@
 //! What is shown and how it nests, for the TUI and `wt status` alike: tasks →
 //! their tickets → MRs no shown worktree holds, then the task's worktrees → the
-//! MR of their branch, agents. After the tasks, a `no task` section (tickets I
+//! MR of their branch, agents; then agents of the task working in none of its
+//! worktrees. After the tasks, a `no task` section (tickets I
 //! work on that belong to no task, worktrees without a ticket) and an `assigned
 //! to me in Jira` one (my open tickets nothing is done on yet).
 
@@ -14,10 +15,19 @@ pub enum Kind {
     Ticket(String),
     Mr(usize),
     Tree(usize),
-    /// A worktree's agent: tree index, index in `Tree::agents`.
-    Agent(usize, usize),
+    /// An agent: whose it is, index in its `agents`.
+    Agent(AgentAt, usize),
     /// A section title; never selected.
     Header(Section),
+}
+
+/// Whose agent an agent row shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentAt {
+    /// A worktree's, by tree index.
+    Tree(usize),
+    /// A task's that works in none of its worktrees, by task index.
+    Task(usize),
 }
 
 impl Kind {
@@ -80,8 +90,7 @@ pub struct Hide {
     /// Ticket rows under tasks: their MRs move up to the task, once each.
     pub tickets: bool,
     pub mrs: bool,
-    /// Worktrees, and their agents with them; an MR a worktree held goes under
-    /// its ticket.
+    /// Worktrees and agents; an MR a worktree held goes under its ticket.
     pub trees: bool,
 }
 
@@ -168,6 +177,14 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
                 .map(mr_node),
         );
         children.extend(trees);
+        if !hide.trees {
+            children.extend((0..row.agents.len()).map(|a| {
+                Node::leaf(
+                    format!("agent:{}:{}", row.task.name, row.agents[a].pane),
+                    Kind::Agent(AgentAt::Task(i), a),
+                )
+            }));
+        }
         roots.push(Node {
             id: format!("task:{}", row.task.name),
             kind: Kind::Task(i),
@@ -305,7 +322,7 @@ fn tree_nodes(table: &Table, trees: &[usize], all: bool, hide: Hide) -> (Vec<Nod
             let agents = (0..tree.agents.len()).map(|a| {
                 Node::leaf(
                     format!("agent:{}:{a}", tree.wt.path.display()),
-                    Kind::Agent(t, a),
+                    Kind::Agent(AgentAt::Tree(t), a),
                 )
             });
             Node {
@@ -412,7 +429,8 @@ mod tests {
             ],
             vec![tree("a", "i.udalov/UCP-1-a"), tree("misc", "i.udalov/misc")],
         );
-        inputs.agents = vec![agent("x", "a", "w")];
+        inputs.workspaces = vec![workspace("w", "a2i")];
+        inputs.agents = vec![agent("x", "a", "w"), agent("y", "main", "w")];
         let table = assemble(inputs);
         let (m10, m11) = (table.mr_index(10), table.mr_index(11));
         let shown = |hide: Hide| {
@@ -434,6 +452,7 @@ mod tests {
                 "  ticket:a2i:UCP-1",
                 "  tree:/a",
                 "    agent:/a:0",
+                "  agent:a2i:w:y",
                 "header:no task",
                 "tree:/misc",
                 "header:assigned to me in Jira",

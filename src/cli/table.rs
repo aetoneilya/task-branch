@@ -162,7 +162,7 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
                     name,
                     look::state(row.row_state(), true).into(),
                     Cell::default(),
-                    Cell::default(),
+                    agents_cell(table, node),
                 ]);
                 rows.extend(children(table, node, None, ""));
             }
@@ -367,14 +367,14 @@ fn tree_name(tree: &Tree, width: usize) -> Cell {
     cell
 }
 
-/// The worktree's agents as `name status`, the status colored by what it needs
-/// from me.
-fn agents_cell(table: &Table, tree: &Node) -> Cell {
-    let cells = tree
+/// The agents right under a worktree or a task as `name status`, the status
+/// colored by what it needs from me.
+fn agents_cell(table: &Table, node: &Node) -> Cell {
+    let cells = node
         .children
         .iter()
         .filter_map(|n| match n.kind {
-            Kind::Agent(t, a) => Some(&table.tree(t).agents[a]),
+            Kind::Agent(at, a) => Some(table.agent(at, a)),
             _ => None,
         })
         .map(|agent| {

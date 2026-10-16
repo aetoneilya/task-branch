@@ -2,8 +2,8 @@
 //! → agents; tickets without a task and worktrees without a ticket after them.
 
 use crate::table::look::{self, Piece, Tone};
-pub use crate::table::view::Kind;
 use crate::table::view::{self, Hide, Node};
+pub use crate::table::view::{AgentAt, Kind};
 use crate::table::{Agent, RowState, Table};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -184,7 +184,7 @@ fn label(table: &Table, kind: &Kind) -> Vec<Span<'static>> {
             pieces.extend(look::tree_marks(tree));
             pieces
         }
-        Kind::Agent(t, a) => return agent_spans(&table.tree(*t).agents[*a], Tone::Plain),
+        Kind::Agent(at, a) => return agent_spans(table.agent(*at, *a), Tone::Plain),
     };
     spans(pieces)
 }

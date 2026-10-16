@@ -107,6 +107,9 @@ pub fn assemble(inputs: Inputs) -> Table {
             .partition(|key| finders[key] > 1);
     }
 
+    for row in &mut rows {
+        row.agents = agents_outside(row.space.as_deref(), &agents, &trees);
+    }
     for row in rows.iter_mut().filter(|r| !r.task.done) {
         row.new_sessions = discover_sessions(row, &trees, &roots, &sessions);
         if complete {
@@ -259,6 +262,7 @@ fn task_row(
         shared_tickets: Vec::new(),
         new_sessions: Vec::new(),
         space,
+        agents: Vec::new(),
         state: None,
     }
 }
@@ -388,6 +392,28 @@ pub(super) fn agents_in(
         .collect()
 }
 
+/// Agents of herdr workspace `space` that work in none of `trees`.
+pub(super) fn agents_outside(
+    space: Option<&str>,
+    agents: &[herdr::Agent],
+    trees: &[Tree],
+) -> Vec<Agent> {
+    let Some(space) = space else {
+        return Vec::new();
+    };
+    agents
+        .iter()
+        .filter(|a| a.workspace_id == space)
+        .filter(|a| {
+            !trees
+                .iter()
+                .flat_map(|t| &t.agents)
+                .any(|t| t.pane == a.pane_id)
+        })
+        .map(Agent::from_herdr)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::*;
@@ -439,6 +465,34 @@ mod tests {
             (fixer.name.as_str(), fixer.status),
             ("fixer", crate::table::AgentStatus::Working)
         );
+    }
+
+    #[test]
+    fn an_agent_outside_the_worktrees_stays_with_the_task_of_its_workspace() {
+        let mut inputs = inputs(
+            vec![task("video", &[]), task("a2i", &["UCP-1"])],
+            vec![],
+            vec![],
+            vec![tree("a2i-config", "i.udalov/UCP-1-config")],
+        );
+        inputs.workspaces = vec![workspace("w1", "video"), workspace("w2", "a2i")];
+        inputs.agents = vec![
+            agent("research", "main", "w1"),
+            agent("coder", "a2i-config", "w2"),
+            agent("lost", "main", "w3"),
+        ];
+        let mut table = assemble(inputs);
+        let names = |table: &Table, task: &str| -> Vec<String> {
+            let row = table.task_row(task);
+            row.agents.iter().map(|a| a.name.clone()).collect()
+        };
+        assert_eq!(names(&table, "video"), vec!["research"]);
+        // the one in a worktree shows there, not twice
+        assert!(names(&table, "a2i").is_empty());
+
+        table.update_agents(&[agent("research", "main", "w1"), agent("next", "main", "w2")]);
+        assert_eq!(names(&table, "video"), vec!["research"]);
+        assert_eq!(names(&table, "a2i"), vec!["next"]);
     }
 
     #[test]

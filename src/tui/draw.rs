@@ -1,6 +1,9 @@
 //! Drawing: the task tree, prompt line, footer hints, help.
 
-use super::{App, MESSAGE_FOR, PREVIEW_MIN_WIDTH, Prompt, rows::Kind};
+use super::{
+    App, MESSAGE_FOR, PREVIEW_MIN_WIDTH, Prompt,
+    rows::{AgentAt, Kind},
+};
 use crate::table::look::clean;
 use crate::table::view::Section;
 use ratatui::Frame;
@@ -149,13 +152,15 @@ impl App {
                     keys.push(("R", "review".into()));
                     keys.push(("d", "done".into()));
                 }
-                Kind::Agent(..) => {
+                Kind::Agent(at, _) => {
                     keys.push(("⏎", "focus".into()));
                     if has_url {
                         keys.push(("b", "browser".into()));
                     }
-                    keys.push(("R", "review".into()));
-                    keys.push(("d", "done".into()));
+                    if let AgentAt::Tree(_) = at {
+                        keys.push(("R", "review".into()));
+                        keys.push(("d", "done".into()));
+                    }
                 }
             }
             if self.ide_tree().is_some() {

@@ -1,6 +1,7 @@
-use crate::config::VaultConfig;
+use crate::config::{Config, VaultConfig};
 use crate::vault::note::{Note, NoteError};
 use regex::Regex;
+use serde_yaml::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -110,6 +111,70 @@ impl Task {
             note,
         }
     }
+
+    /// Writes a derived `state`, tickets found on the task's work and sessions
+    /// the note does not list yet into its frontmatter; the note's own entries
+    /// stay as written, found ones go after them. True when the note changed on
+    /// disk: the task then holds them too, taken out of `tickets` and `sessions`.
+    pub fn record(
+        &mut self,
+        state: Option<TaskState>,
+        tickets: &mut Vec<String>,
+        sessions: &mut Vec<SessionRef>,
+    ) -> Result<bool, NoteError> {
+        let mut changed = false;
+        if let Some(state) = state
+            && self.state != Some(state)
+        {
+            self.note
+                .set("state", Value::String(state.as_str().to_string()));
+            changed = true;
+        }
+        if !tickets.is_empty() {
+            let entries = self
+                .note
+                .strings("tickets")
+                .into_iter()
+                .chain(tickets.iter().cloned())
+                .map(Value::String)
+                .collect();
+            self.note.set("tickets", Value::Sequence(entries));
+            changed = true;
+        }
+        if !sessions.is_empty() {
+            let entries = self
+                .sessions
+                .iter()
+                .chain(sessions.iter())
+                .map(|s| Value::String(s.entry()))
+                .collect();
+            self.note.set("sessions", Value::Sequence(entries));
+            changed = true;
+        }
+        if !changed || !self.note.save()? {
+            return Ok(false);
+        }
+        if state.is_some() {
+            self.state = state;
+        }
+        self.sessions.append(sessions);
+        self.tickets.append(tickets);
+        Ok(true)
+    }
+}
+
+/// The `[vault]` section: every command that reads task notes needs it.
+pub fn vault_config(config: &Config) -> Result<&VaultConfig, String> {
+    config
+        .vault
+        .as_ref()
+        .ok_or_else(|| "no [vault] section in ~/.config/worktable/config.toml".to_string())
+}
+
+/// The tasks of the configured vault, and the notes skipped because they
+/// could not be read.
+pub fn load(config: &Config) -> Result<(Vec<Task>, Vec<NoteError>), String> {
+    Ok(load_tasks(vault_config(config)?))
 }
 
 /// Task notes under the configured folders; notes whose frontmatter does not

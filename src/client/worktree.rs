@@ -35,6 +35,12 @@ impl Worktree {
 }
 
 fn git_output(path: &Path, args: &[&str]) -> Result<String> {
+    git_stdout(path, args).map(|out| out.trim_start().to_string())
+}
+
+/// git's stdout without its trailing newline: leading spaces mean something in
+/// `git status --short`.
+fn git_stdout(path: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)
@@ -48,7 +54,9 @@ fn git_output(path: &Path, args: &[&str]) -> Result<String> {
             stderr.lines().next().unwrap_or("").trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string())
 }
 
 /// Root of the main checkout, also when `path` is inside a linked worktree.
@@ -106,12 +114,28 @@ pub fn changed_files(path: &Path) -> Result<usize> {
     Ok(output.lines().filter(|l| !l.is_empty()).count())
 }
 
+/// `git status --short`: one line per changed file.
+pub fn short_status(path: &Path) -> Result<String> {
+    git_stdout(path, &["status", "--short"])
+}
+
+/// Whether origin has `branch`. Branches are created --no-track: origin/<branch>
+/// is what unpushed commits are counted against.
+pub fn on_origin(path: &Path, branch: &str) -> bool {
+    let remote_branch = format!("origin/{branch}");
+    git_output(path, &["rev-parse", "--verify", "--quiet", &remote_branch]).is_ok()
+}
+
+/// `git log --oneline` of `range`, newest first, at most `max` commits.
+pub fn log_oneline(path: &Path, range: &str, max: usize) -> Result<String> {
+    git_output(path, &["log", "--oneline", &format!("-{max}"), range])
+}
+
 /// Commits of `branch` that are not on origin: compared with origin/<branch> when it
 /// exists, otherwise with origin/HEAD (the branch was never pushed).
 pub fn unpushed_commits(path: &Path, branch: &str) -> Result<usize> {
-    let remote_branch = format!("origin/{branch}");
-    let base = if git_output(path, &["rev-parse", "--verify", "--quiet", &remote_branch]).is_ok() {
-        remote_branch
+    let base = if on_origin(path, branch) {
+        format!("origin/{branch}")
     } else {
         "origin/HEAD".to_string()
     };

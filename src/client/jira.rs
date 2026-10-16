@@ -71,6 +71,12 @@ impl JiraClient {
         })
     }
 
+    /// A client with the token from `JIRA_TOKEN`.
+    pub fn from_env(base_url: &str) -> std::result::Result<Self, String> {
+        let token = std::env::var("JIRA_TOKEN").map_err(|_| "JIRA_TOKEN is not set".to_string())?;
+        JiraClient::new(base_url, &token).map_err(|err| err.to_string())
+    }
+
     fn get_json<T: serde::de::DeserializeOwned>(
         &self,
         url: &str,

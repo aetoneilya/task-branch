@@ -3,6 +3,7 @@
 //! joins them, `view` decides what is shown and how it nests.
 
 mod fetch;
+pub mod look;
 mod matching;
 pub mod view;
 
@@ -10,16 +11,14 @@ pub mod view;
 mod fixtures;
 
 use crate::client::gitlab::{MergeRequest, MrReview, MrState};
-use crate::client::jira::{JiraClient, JiraIssue};
+use crate::client::jira::JiraIssue;
 use crate::client::worktree::Worktree;
 use crate::client::{herdr, sessions};
 use crate::config::Config;
 use crate::vault::task::{SessionRef, Task, TaskState, ticket_keys};
 use regex::Regex;
-use serde_yaml::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
@@ -53,7 +52,6 @@ pub struct Ticket {
     pub summary: String,
     pub status: String,
     pub category: Category,
-    pub url: String,
     /// Assigned to me and not done.
     pub mine: bool,
     /// RFC 3339.
@@ -61,13 +59,12 @@ pub struct Ticket {
 }
 
 impl Ticket {
-    fn from_issue(issue: &JiraIssue, host: &str, mine: bool) -> Ticket {
+    fn from_issue(issue: &JiraIssue, mine: bool) -> Ticket {
         Ticket {
             key: issue.key.clone(),
             summary: issue.fields.summary.clone(),
             status: issue.status().to_string(),
             category: Category::parse(issue.status_category()),
-            url: format!("{}/browse/{}", host.trim_end_matches('/'), issue.key),
             mine,
             created: issue.fields.created.to_rfc3339(),
         }
@@ -110,7 +107,7 @@ impl Mr {
     }
 
     /// The title without the ticket key it starts with: rows show the key apart.
-    pub fn short_title(&self) -> Cow<'_, str> {
+    fn short_title(&self) -> Cow<'_, str> {
         LEADING_KEY.replace(self.mr.title(), "")
     }
 }
@@ -126,7 +123,7 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
-    pub fn parse(status: &str) -> AgentStatus {
+    fn parse(status: &str) -> AgentStatus {
         match status {
             "working" => AgentStatus::Working,
             "blocked" => AgentStatus::Blocked,
@@ -221,17 +218,34 @@ impl TaskRow {
         self.state.or(self.task.state)
     }
 
-    /// What a row shows as the task's state: `done` for a closed task.
-    pub fn state_label(&self) -> &'static str {
+    /// What a row shows as the task's state: done for a closed task.
+    pub fn row_state(&self) -> Option<RowState> {
         if self.task.done {
-            return "done";
+            return Some(RowState::Done);
         }
-        self.current_state().map_or("", TaskState::as_str)
+        self.current_state().map(RowState::Task)
     }
 
     /// The note's tickets, then the ones found on its worktrees and MRs.
     pub fn tickets(&self) -> impl Iterator<Item = &String> {
         self.task.tickets.iter().chain(&self.found_tickets)
+    }
+}
+
+/// A task's state as rows show it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    Task(TaskState),
+    /// A closed task.
+    Done,
+}
+
+impl RowState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RowState::Task(state) => state.as_str(),
+            RowState::Done => "done",
+        }
     }
 }
 
@@ -241,6 +255,9 @@ pub struct LooseTicket {
     pub key: String,
     pub trees: Vec<usize>,
     pub mrs: Vec<usize>,
+    /// `active` or `review` with a live worktree or an open MR; None when
+    /// nothing is done on it yet.
+    pub state: Option<TaskState>,
 }
 
 #[derive(Debug)]
@@ -291,7 +308,7 @@ pub fn branch_finished(mr: &MergeRequest, unpushed: usize, head: Option<&str>) -
 /// Writes changed `state`, found tickets and new `sessions` into the notes of
 /// open tasks. Returns the names of updated notes; failures go to `table.warnings`.
 pub fn write_back(table: &mut Table) -> Vec<String> {
-    let _lock = match lock() {
+    let _lock = match crate::vault::lock() {
         Ok(lock) => lock,
         Err(err) => {
             table
@@ -303,74 +320,16 @@ pub fn write_back(table: &mut Table) -> Vec<String> {
 
     let mut updated = Vec::new();
     for row in table.tasks.iter_mut().filter(|r| !r.task.done) {
-        let mut changed = false;
-        if let Some(state) = row.state
-            && row.task.state != Some(state)
+        match row
+            .task
+            .record(row.state, &mut row.found_tickets, &mut row.new_sessions)
         {
-            row.task
-                .note
-                .set("state", Value::String(state.as_str().to_string()));
-            changed = true;
-        }
-        if !row.found_tickets.is_empty() {
-            // the note's own entries stay as written; found keys go after them
-            let entries = row
-                .task
-                .note
-                .strings("tickets")
-                .into_iter()
-                .chain(row.found_tickets.iter().cloned())
-                .map(Value::String)
-                .collect();
-            row.task.note.set("tickets", Value::Sequence(entries));
-            changed = true;
-        }
-        if !row.new_sessions.is_empty() {
-            let entries = row
-                .task
-                .sessions
-                .iter()
-                .chain(&row.new_sessions)
-                .map(|s| Value::String(s.entry()))
-                .collect();
-            row.task.note.set("sessions", Value::Sequence(entries));
-            changed = true;
-        }
-        if !changed {
-            continue;
-        }
-        match row.task.note.save() {
-            Ok(true) => {
-                updated.push(row.task.name.clone());
-                if let Some(state) = row.state {
-                    row.task.state = Some(state);
-                }
-                row.task.sessions.append(&mut row.new_sessions);
-                row.task.tickets.append(&mut row.found_tickets);
-            }
+            Ok(true) => updated.push(row.task.name.clone()),
             Ok(false) => {}
             Err(err) => table.warnings.push(err.to_string()),
         }
     }
     updated
-}
-
-/// Serialises note writes between concurrent `wt` processes.
-pub fn lock() -> std::io::Result<File> {
-    let dir = crate::config::cache_dir();
-    std::fs::create_dir_all(&dir)?;
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("lock"))?;
-    file.lock()?;
-    Ok(file)
-}
-
-pub fn jira_client(config: &Config) -> Result<JiraClient, String> {
-    let token = std::env::var("JIRA_TOKEN").map_err(|_| "JIRA_TOKEN is not set".to_string())?;
-    JiraClient::new(config.jira.host.clone(), &token).map_err(|err| err.to_string())
 }
 
 impl Table {
@@ -393,15 +352,6 @@ impl Table {
 
     /// The Jira page of `key`, fetched or not.
     pub fn ticket_url(&self, key: &str) -> String {
-        match self.tickets.get(key) {
-            Some(ticket) => ticket.url.clone(),
-            None => format!("{}/browse/{key}", self.jira_host.trim_end_matches('/')),
-        }
-    }
-
-    /// `active` or `review` for a loose ticket with a live worktree or an open
-    /// MR; None when nothing is done on it yet.
-    pub fn loose_state(&self, i: usize) -> Option<TaskState> {
-        matching::loose_state(&self.loose[i], &self.trees, &self.mrs)
+        format!("{}/browse/{key}", self.jira_host.trim_end_matches('/'))
     }
 }

@@ -4,7 +4,7 @@ use super::brief::brief_path;
 use super::common::{current_repo, err, find_task, fuzzy, is_ticket_key};
 use super::launch::{launch, open_agent};
 use crate::cli::SelectArgs;
-use crate::cli::table::load;
+use crate::cli::load;
 use crate::client::{herdr, worktree};
 use crate::config::Config;
 use crate::table::{self, Table, TaskRow};

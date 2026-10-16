@@ -15,8 +15,32 @@ pub enum Kind {
     Tree(usize),
     /// A worktree's agent: tree index, index in `Tree::agents`.
     Agent(usize, usize),
-    /// A section title, `id` is `header:<title>`; never selected.
-    Header,
+    /// A section title; never selected.
+    Header(Section),
+}
+
+impl Kind {
+    pub fn is_header(&self) -> bool {
+        matches!(self, Kind::Header(_))
+    }
+}
+
+/// The sections after the tasks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    /// Tickets I work on that belong to no task, worktrees without a ticket.
+    NoTask,
+    /// My open tickets nothing is done on yet.
+    Assigned,
+}
+
+impl Section {
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::NoTask => "no task",
+            Section::Assigned => "assigned to me in Jira",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -35,15 +59,7 @@ impl Node {
             children: Vec::new(),
         }
     }
-
-    /// A section's title.
-    pub fn title(&self) -> &str {
-        self.id.trim_start_matches("header:")
-    }
 }
-
-pub const NO_TASK: &str = "no task";
-pub const ASSIGNED: &str = "assigned to me in Jira";
 
 #[derive(Default)]
 pub struct Options<'a> {
@@ -53,6 +69,8 @@ pub struct Options<'a> {
     pub filter: &'a str,
     /// Only tasks with this tag, and none of the sections.
     pub tag: Option<&'a str>,
+    /// No ticket rows under tasks: their MRs move up to the task, once each.
+    pub hide_tickets: bool,
 }
 
 pub fn build(table: &Table, options: &Options) -> Vec<Node> {
@@ -93,18 +111,27 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
         let (trees, held) = tree_nodes(table, &row.trees, all);
         let free_mr = |m: usize| !held.contains(&m) && (all || table.mr(m).opened());
         let mut children = Vec::new();
+        let mut lifted = Vec::new();
         for key in row.tickets() {
             let mrs = row
                 .mrs
                 .iter()
                 .copied()
-                .filter(|&m| table.mr(m).keys.contains(key) && free_mr(m))
-                .map(mr_node)
-                .collect();
+                .filter(|&m| table.mr(m).keys.contains(key) && free_mr(m));
+            if options.hide_tickets {
+                // an MR with the keys of two tickets is under both
+                for m in mrs {
+                    if !lifted.contains(&m) {
+                        lifted.push(m);
+                        children.push(mr_node(m));
+                    }
+                }
+                continue;
+            }
             children.push(Node {
                 id: format!("ticket:{}:{key}", row.task.name),
                 kind: Kind::Ticket(key.clone()),
-                children: mrs,
+                children: mrs.map(mr_node).collect(),
             });
         }
         children.extend(
@@ -203,10 +230,13 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
         },
         _ => 2,
     });
-    for (title, section) in [(NO_TASK, no_task), (ASSIGNED, assigned)] {
-        if !section.is_empty() {
-            roots.push(Node::leaf(format!("header:{title}"), Kind::Header));
-            roots.extend(section);
+    for (section, nodes) in [(Section::NoTask, no_task), (Section::Assigned, assigned)] {
+        if !nodes.is_empty() {
+            roots.push(Node::leaf(
+                format!("header:{}", section.title()),
+                Kind::Header(section),
+            ));
+            roots.extend(nodes);
         }
     }
     roots
@@ -321,6 +351,29 @@ mod tests {
             },
         );
         assert!(outline(&all).contains(&format!("    mr:{m12}")));
+    }
+
+    #[test]
+    fn hidden_tickets_leave_their_mrs_to_the_task_once() {
+        let table = table(
+            vec![task("a2i", &["UCP-1", "UCP-2"])],
+            vec![],
+            vec![mr(10, "i.udalov/UCP-1-UCP-2", "both", "opened")],
+            vec![tree("a", "i.udalov/UCP-1-a")],
+        );
+        let m10 = table.mr_index(10);
+        let options = Options {
+            hide_tickets: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            outline(&build(&table, &options)),
+            vec![
+                "task:a2i".to_string(),
+                format!("  mr:{m10}"),
+                "  tree:/a".to_string(),
+            ]
+        );
     }
 
     #[test]

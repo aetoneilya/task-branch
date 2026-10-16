@@ -6,14 +6,12 @@ use super::common::{
     name_from_issue, name_from_text, resolve_task,
 };
 use super::launch::open_work;
-use crate::cli::table::{load, vault};
-use crate::cli::{AddArgs, StartArgs};
-use crate::client::jira::JiraIssue;
+use crate::cli::{AddArgs, StartArgs, load};
+use crate::client::jira::{JiraClient, JiraIssue};
 use crate::client::worktree;
 use crate::config::Config;
-use crate::table;
 use crate::vault::note::Note;
-use crate::vault::task::{Task, ticket_keys};
+use crate::vault::task::{Task, ticket_keys, vault_config};
 use dialoguer::Input;
 use dialoguer::theme::ColorfulTheme;
 use serde_yaml::Value;
@@ -99,7 +97,7 @@ fn start(config: &Config, tasks: Vec<Task>, mut args: StartArgs) -> Result<(), S
     let branch = branch.unwrap_or_else(|| branch_name(config, keys.first(), &wt_name));
     let main = current_repo(config)?;
 
-    let vault = vault(config)?;
+    let vault = vault_config(config)?;
     let path = vault
         .path
         .join(&vault.new_task_dir)
@@ -167,7 +165,7 @@ fn add(config: &Config, tasks: Vec<Task>, args: AddArgs) -> Result<(), String> {
     let mut task = resolve_task(config, tasks, task_arg.as_deref())?;
 
     if !task.tickets.contains(&key) {
-        let _lock = table::lock().map_err(err)?;
+        let _lock = crate::vault::lock().map_err(err)?;
         task.tickets.push(key.clone());
         task.note.set("tickets", list(&task.tickets));
         task.note.save().map_err(err)?;
@@ -212,7 +210,7 @@ fn add(config: &Config, tasks: Vec<Task>, args: AddArgs) -> Result<(), String> {
 
 /// My open Jira tickets that belong to no task, plus "new task…".
 fn pick_start_target(config: &Config, tasks: &[Task]) -> Result<String, String> {
-    let client = table::jira_client(config)?;
+    let client = JiraClient::from_env(&config.jira.host)?;
     let issues = client
         .search_issues_brief(
             "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",

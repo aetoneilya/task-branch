@@ -2,10 +2,11 @@ mod progress;
 mod table;
 mod work;
 
-use crate::config::load_config;
+use crate::config::{Config, load_config};
+use crate::vault::task::Task;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -167,4 +168,18 @@ pub fn run() -> Result<(), String> {
         }
         CliCommands::Tui {} => unreachable!(),
     }
+}
+
+/// The vault's tasks; notes that can't be read are reported and left out.
+fn load(config: &Config) -> Result<Vec<Task>, String> {
+    let (tasks, skipped) = crate::vault::task::load(config)?;
+    for err in skipped {
+        eprintln!("skipped {err}");
+    }
+    Ok(tasks)
+}
+
+/// Colors on a terminal only, and never with NO_COLOR set.
+fn colors(stream: &impl IsTerminal) -> bool {
+    stream.is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }

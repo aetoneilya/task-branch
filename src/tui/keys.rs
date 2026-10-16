@@ -2,7 +2,7 @@
 
 use super::{App, Prompt, Update, rows::Kind};
 use crate::client::herdr;
-use crate::table::{self, Table};
+use crate::table::Table;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
@@ -22,13 +22,12 @@ impl App {
         let selected = self.list.selected().unwrap_or(0);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('c') if ctrl => self.quit = true,
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 self.rebuild();
             }
-            KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('c') if ctrl => self.quit = true,
             KeyCode::Char('l') if ctrl => {
                 let _ = terminal.clear();
             }
@@ -131,14 +130,13 @@ impl App {
             }
             KeyCode::Enter => {
                 match prompt {
-                    Prompt::Filter => {}
+                    Prompt::Filter | Prompt::StartTicket(_) => {}
                     Prompt::AddTicket(task) => {
                         let key = text.trim().to_uppercase();
                         if !key.is_empty() {
                             self.run_wt(terminal, &["add", &task, &key]);
                         }
                     }
-                    Prompt::StartTicket(_) => {}
                     Prompt::NoteLine(path) => {
                         if !text.trim().is_empty() {
                             let line = format!(
@@ -197,7 +195,7 @@ impl App {
         }
     }
 
-    pub(super) fn unfold(&mut self) {
+    fn unfold(&mut self) {
         let Some(row) = self.current() else { return };
         let id = row.id.clone();
         if self.folded.remove(&id) {
@@ -214,14 +212,14 @@ impl App {
         }
     }
 
-    pub(super) fn note(&self) -> Option<PathBuf> {
+    fn note(&self) -> Option<PathBuf> {
         match &self.current()?.root {
             Kind::Task(i) => Some(self.table.tasks[*i].task.note.path.clone()),
             _ => None,
         }
     }
 
-    pub(super) fn tree(&self) -> Option<usize> {
+    fn tree(&self) -> Option<usize> {
         match self.current()?.kind {
             Kind::Tree(t) | Kind::Agent(t, _) => Some(t),
             _ => None,
@@ -242,7 +240,7 @@ impl App {
                     _ => None,
                 }
             }
-            Kind::Task(_) | Kind::Header => None,
+            Kind::Task(_) | Kind::Header(_) => None,
         }
     }
 
@@ -278,8 +276,9 @@ impl App {
             }
             Kind::Mr(_) => self.open_in_browser(),
             Kind::Ticket(key) => self.run_wt(terminal, &["select", &key]),
-            Kind::Header => {}
-            Kind::Loose(i) if !self.loose_has_work(i) => {
+            Kind::Header(_) => {}
+            // nothing `wt select` can get back to yet: no worktree, no open MR
+            Kind::Loose(i) if self.table.loose[i].state.is_none() => {
                 let key = self.table.loose[i].key.clone();
                 self.prompt = Some((Prompt::StartTicket(key), String::new()));
             }
@@ -291,12 +290,7 @@ impl App {
         }
     }
 
-    /// A worktree or an open MR: something `wt select` can get back to.
-    pub(super) fn loose_has_work(&self, i: usize) -> bool {
-        self.table.loose_state(i).is_some()
-    }
-
-    pub(super) fn focus(&mut self, agent: &str) {
+    fn focus(&mut self, agent: &str) {
         match herdr::focus_agent(agent) {
             Ok(()) => {
                 self.say(format!("→ {agent}"));
@@ -385,7 +379,7 @@ impl App {
 
     /// `s`: a ticket gets its worktree (`wt start KEY` adds it to its task); on a
     /// task, asks which ticket to add.
-    pub(super) fn start(&mut self, terminal: &mut DefaultTerminal) {
+    fn start(&mut self, terminal: &mut DefaultTerminal) {
         let Some(row) = self.current() else { return };
         match row.kind.clone() {
             Kind::Ticket(key) => self.run_wt(terminal, &["start", &key]),
@@ -466,7 +460,7 @@ fn agent_name(table: &Table, tree: usize, agent: usize) -> String {
 /// Appends `- line` to the note's own text under the notes lock, rereading it
 /// first: agents may have just written to it.
 fn add_note_line(path: &Path, line: &str) -> Result<(), String> {
-    let _lock = table::lock().map_err(|e| e.to_string())?;
+    let _lock = crate::vault::lock().map_err(|e| e.to_string())?;
     let mut note = crate::vault::note::Note::read(path).map_err(|e| e.to_string())?;
     note.append_line(line);
     note.save().map(|_| ()).map_err(|e| e.to_string())
@@ -484,6 +478,6 @@ fn percent_encode(text: &str) -> String {
         .collect()
 }
 
-pub(super) fn open(target: &str) {
+fn open(target: &str) {
     let _ = Command::new("open").arg(target).spawn();
 }

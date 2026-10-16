@@ -2,24 +2,48 @@
 
 use super::{
     App, Update,
-    rows::{self, Kind, clean},
+    rows::{self, Kind, dim, spans},
 };
+use crate::client::jira::JiraClient;
+use crate::client::{herdr, worktree};
 use crate::config::Config;
-use crate::table;
-use ratatui::style::{Color, Modifier, Style};
+use crate::table::look::{self, Piece, Tone, clean};
 use ratatui::text::{Line, Span};
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+
+/// The slow part of a row's details, loaded on selection.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Detail {
+    /// A ticket's description, by key.
+    Description(String),
+    /// A worktree's git status and commits.
+    Git {
+        path: PathBuf,
+        branch: Option<String>,
+    },
+    /// An agent's recent screen, by pane: unnamed agents and duplicate names
+    /// read the right screen.
+    Screen(String),
+}
+
+fn bold(text: impl Into<String>) -> Span<'static> {
+    Piece::new(text, Tone::Bold).into()
+}
 
 impl App {
-    /// The slow part of a row's details, loaded on selection.
-    pub(super) fn detail_key(&self, kind: &Kind) -> Option<String> {
+    pub(super) fn detail(&self, kind: &Kind) -> Option<Detail> {
+        let table = &self.table;
         match kind {
-            Kind::Loose(i) => Some(format!("desc:{}", self.table.loose[*i].key)),
-            Kind::Ticket(key) => Some(format!("desc:{key}")),
-            Kind::Tree(t) => Some(format!("git:{}", self.table.tree(*t).wt.path.display())),
-            // by pane: unnamed agents and duplicate names read the right screen
-            Kind::Agent(t, a) => Some(format!("agent:{}", self.table.tree(*t).agents[*a].pane)),
+            Kind::Loose(i) => Some(Detail::Description(table.loose[*i].key.clone())),
+            Kind::Ticket(key) => Some(Detail::Description(key.clone())),
+            Kind::Tree(t) => {
+                let wt = &table.tree(*t).wt;
+                Some(Detail::Git {
+                    path: wt.path.clone(),
+                    branch: wt.branch.clone(),
+                })
+            }
+            Kind::Agent(t, a) => Some(Detail::Screen(table.tree(*t).agents[*a].pane.clone())),
             _ => None,
         }
     }
@@ -28,17 +52,17 @@ impl App {
         if !self.preview_shown {
             return;
         }
-        let Some(key) = self.current().and_then(|r| self.detail_key(&r.kind)) else {
+        let Some(detail) = self.current().and_then(|r| self.detail(&r.kind)) else {
             return;
         };
-        if self.details.contains_key(&key) || self.pending.contains(&key) {
+        if self.details.contains_key(&detail) || self.pending.contains(&detail) {
             return;
         }
-        self.pending.insert(key.clone());
+        self.pending.insert(detail.clone());
         let (config, tx) = (self.config.clone(), self.tx.clone());
         std::thread::spawn(move || {
-            let text = load_detail(&config, &key);
-            let _ = tx.send(Update::Detail(key, text));
+            let text = load_detail(&config, &detail);
+            let _ = tx.send(Update::Detail(detail, text));
         });
     }
 
@@ -47,77 +71,33 @@ impl App {
             return vec![Line::from("no active work — . shows everything")];
         };
         let table = &self.table;
-        let bold = |s: String| Span::styled(s, Style::default().add_modifier(Modifier::BOLD));
-        let dim = |s: String| Span::styled(s, Style::default().fg(Color::DarkGray));
-        let lazy = |key: Option<String>| -> Vec<Line<'static>> {
-            match key.and_then(|k| self.details.get(&k).cloned()) {
-                Some(text) => text.lines().map(|l| Line::from(clean(l))).collect(),
-                None => vec![Line::from(dim("loading…".to_string()))],
-            }
-        };
         let mut lines: Vec<Line<'static>> = Vec::new();
         match &row.kind {
             Kind::Task(i) => {
                 let row = &table.tasks[*i];
-                let state = row.state_label();
-                lines.push(Line::from(vec![
-                    rows::state_mark(state),
-                    bold(row.task.name.clone()),
-                ]));
-                let mut meta = vec![dim(state.to_string())];
+                let state = row.row_state();
+                lines.push(Line::from(spans([
+                    look::state(state, false),
+                    Piece::new(row.task.name.clone(), Tone::Bold),
+                ])));
+                let mut meta = vec![dim(state.map_or("", |s| s.as_str()))];
                 if !row.task.tags.is_empty() {
                     meta.push(dim(format!("  #{}", row.task.tags.join(" #"))));
                 }
                 lines.push(Line::from(meta));
                 lines.push(Line::from(dim(display_path(&row.task.note.path))));
                 for key in row.tickets() {
-                    let mut spans =
-                        vec![Span::styled(key.clone(), Style::default().fg(Color::Cyan))];
-                    if let Some(t) = table.tickets.get(key) {
-                        spans.push(Span::styled(
-                            format!(" {}", t.status),
-                            Style::default().fg(rows::status_color(t.category)),
-                        ));
-                        spans.push(Span::raw(format!(" {}", clean(&t.summary))));
-                    }
-                    lines.push(Line::from(spans));
+                    lines.push(Line::from(spans(look::ticket(key, table.tickets.get(key)))));
                 }
                 lines.push(Line::from(""));
                 lines.extend(row.task.note.body().lines().map(|l| Line::from(clean(l))));
             }
-            Kind::Loose(_) | Kind::Ticket(_) => {
-                let key = match &row.kind {
-                    Kind::Loose(i) => table.loose[*i].key.clone(),
-                    Kind::Ticket(key) => key.clone(),
-                    _ => unreachable!(),
-                };
-                match table.tickets.get(&key) {
-                    Some(t) => {
-                        lines.push(Line::from(vec![
-                            Span::styled(key.clone(), Style::default().fg(Color::Cyan)),
-                            bold(format!(" {}", clean(&t.summary))),
-                        ]));
-                        lines.push(Line::from(Span::styled(
-                            t.status.clone(),
-                            Style::default().fg(rows::status_color(t.category)),
-                        )));
-                    }
-                    None => lines.push(Line::from(Span::styled(
-                        key.clone(),
-                        Style::default().fg(Color::Cyan),
-                    ))),
-                }
-                lines.push(Line::from(dim(table.ticket_url(&key))));
-                lines.push(Line::from(""));
-                lines.extend(lazy(self.detail_key(&row.kind)));
-            }
+            Kind::Loose(i) => self.ticket_lines(&table.loose[*i].key, &mut lines),
+            Kind::Ticket(key) => self.ticket_lines(key, &mut lines),
             Kind::Mr(m) => {
-                let mr = &table.mr(*m);
+                let mr = table.mr(*m);
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("!{}", mr.mr.iid()),
-                        Style::default().fg(Color::Blue),
-                    ),
+                    look::mr_iid(mr, false).into(),
                     bold(format!(" {}", clean(mr.mr.title()))),
                 ]));
                 lines.push(Line::from(dim(format!(
@@ -126,29 +106,22 @@ impl App {
                     mr.mr.source_branch()
                 ))));
                 if let Some(review) = &mr.review {
-                    let mut status = vec![Span::raw("pipeline ")];
-                    status.extend(
-                        rows::review_spans(mr)
-                            .into_iter()
-                            .filter(|s| s.content.contains("ci")),
-                    );
-                    if review.pipeline.is_none() {
-                        status.push(dim("none".to_string()));
-                    }
-                    lines.push(Line::from(status));
+                    let pipeline = look::pipeline(review).unwrap_or_else(|| Piece::dim("none"));
+                    lines.push(Line::from(vec![Span::raw("pipeline "), pipeline.into()]));
                     lines.push(Line::from(if review.approved_by.is_empty() {
-                        dim("no approvals".to_string())
+                        dim("no approvals")
                     } else {
-                        Span::styled(
+                        Piece::new(
                             format!("approved by {}", review.approved_by.join(", ")),
-                            Style::default().fg(Color::Green),
+                            Tone::Green,
                         )
+                        .into()
                     }));
                     if review.unresolved > 0 {
-                        lines.push(Line::from(Span::styled(
+                        lines.push(Line::from(Span::from(Piece::new(
                             format!("{} unresolved thread(s)", review.unresolved),
-                            Style::default().fg(Color::Yellow),
-                        )));
+                            Tone::Yellow,
+                        ))));
                     }
                 }
                 if let Some(status) = &mr.mr.detailed_merge_status {
@@ -164,55 +137,60 @@ impl App {
             }
             Kind::Tree(t) => {
                 let tree = table.tree(*t);
-                lines.push(Line::from(bold(format!("⌂ {}", tree.wt.name()))));
+                lines.push(Line::from(bold(format!(
+                    "{} {}",
+                    look::TREE,
+                    tree.wt.name()
+                ))));
                 lines.push(Line::from(dim(display_path(&tree.wt.path))));
                 lines.push(Line::from(dim(tree.wt.branch.clone().unwrap_or_default())));
                 let mut state = Vec::new();
                 if let Some(c) = tree.changes {
-                    state.push(Span::styled(
-                        format!("changed {c}"),
-                        Style::default().fg(Color::Yellow),
-                    ));
+                    state.push(Piece::new(format!("changed {c}"), Tone::Yellow));
                 }
                 if let Some(u) = tree.unpushed {
-                    state.push(Span::styled(
-                        format!("  unpushed {u}"),
-                        Style::default().fg(Color::Magenta),
-                    ));
+                    state.push(Piece::new(format!("  unpushed {u}"), Tone::Magenta));
                 }
                 if let Some(m) = tree.mr {
-                    state.push(Span::styled(
-                        format!(
-                            "  !{} {}",
-                            table.mr(m).mr.iid(),
-                            table.mr(m).mr.state().as_str()
-                        ),
-                        Style::default().fg(Color::Blue),
-                    ));
+                    let mr = &table.mr(m).mr;
+                    let text = format!("  !{} {}", mr.iid(), mr.state().as_str());
+                    state.push(Piece::new(text, Tone::Blue));
                 }
-                lines.push(Line::from(state));
+                lines.push(Line::from(spans(state)));
                 for agent in &tree.agents {
-                    lines.push(Line::from(rows::agent_spans(agent)));
+                    lines.push(Line::from(rows::agent_spans(agent, Tone::Plain)));
                 }
-                lines.push(Line::from(""));
-                lines.extend(lazy(self.detail_key(&row.kind)));
             }
-            Kind::Header => {}
+            Kind::Header(_) => {}
             Kind::Agent(t, a) => {
-                let agent = &table.tree(*t).agents[*a];
-                lines.push(Line::from(vec![
-                    bold(format!("◉ {} ", agent.name)),
-                    Span::styled(
-                        agent.status.as_str(),
-                        Style::default().fg(rows::agent_color(agent.status)),
-                    ),
-                ]));
-                lines.push(Line::from(dim(format!("in {}", table.tree(*t).wt.name()))));
-                lines.push(Line::from(""));
-                lines.extend(lazy(self.detail_key(&row.kind)));
+                let tree = table.tree(*t);
+                lines.push(Line::from(rows::agent_spans(&tree.agents[*a], Tone::Bold)));
+                lines.push(Line::from(dim(format!("in {}", tree.wt.name()))));
+            }
+        }
+        if let Some(detail) = self.detail(&row.kind) {
+            lines.push(Line::from(""));
+            match self.details.get(&detail) {
+                Some(text) => lines.extend(text.lines().map(|l| Line::from(clean(l)))),
+                None => lines.push(Line::from(dim("loading…"))),
             }
         }
         lines
+    }
+
+    /// A ticket's key, summary, status and Jira page.
+    fn ticket_lines(&self, key: &str, lines: &mut Vec<Line<'static>>) {
+        match self.table.tickets.get(key) {
+            Some(t) => {
+                lines.push(Line::from(vec![
+                    look::key(key).into(),
+                    bold(format!(" {}", clean(&t.summary))),
+                ]));
+                lines.push(Line::from(Span::from(look::status(t))));
+            }
+            None => lines.push(Line::from(Span::from(look::key(key)))),
+        }
+        lines.push(Line::from(dim(self.table.ticket_url(key))));
     }
 }
 
@@ -277,10 +255,10 @@ fn display_path(path: &Path) -> String {
 
 /// Ticket description, worktree's git status and unpushed commits, or the
 /// agent's recent screen.
-fn load_detail(config: &Config, key: &str) -> String {
-    if let Some(ticket) = key.strip_prefix("desc:") {
-        return match table::jira_client(config)
-            .and_then(|c| c.get_issue_by_key(ticket).map_err(|e| e.to_string()))
+fn load_detail(config: &Config, detail: &Detail) -> String {
+    match detail {
+        Detail::Description(key) => match JiraClient::from_env(&config.jira.host)
+            .and_then(|c| c.get_issue_by_key(key).map_err(|e| e.to_string()))
         {
             Ok(issue) => issue
                 .fields
@@ -288,56 +266,33 @@ fn load_detail(config: &Config, key: &str) -> String {
                 .map(|d| jira_text(&d))
                 .unwrap_or_else(|| "(no description)".to_string()),
             Err(e) => format!("! {e}"),
-        };
+        },
+        Detail::Git { path, branch } => git_detail(path, branch.as_deref()),
+        Detail::Screen(pane) => herdr::read_agent(pane, 30).unwrap_or_else(|e| format!("! {e}")),
     }
-    if let Some(path) = key.strip_prefix("git:") {
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .arg("-C")
-                .arg(path)
-                .args(args)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
-                .unwrap_or_default()
-        };
-        let status = git(&["status", "--short"]);
-        let branch = git(&["branch", "--show-current"]);
-        // branches are created --no-track: unpushed means not in origin/<branch>
-        let unpushed = match git(&["rev-parse", "--verify", "-q", &format!("origin/{branch}")]) {
-            remote if remote.is_empty() => "branch not pushed".to_string(),
-            _ => git(&["log", "--oneline", "-15", &format!("origin/{branch}..HEAD")]),
-        };
-        let commits = git(&["log", "--oneline", "-15", "origin/HEAD..HEAD"]);
-        let mut out = String::new();
-        if status.is_empty() {
-            out.push_str("nothing uncommitted\n");
-        } else {
-            out.push_str(&format!("uncommitted:\n{status}\n"));
-        }
-        if !unpushed.is_empty() {
-            out.push_str(&format!("\nunpushed:\n{unpushed}\n"));
-        }
-        if !commits.is_empty() {
-            out.push_str(&format!("\nbranch commits:\n{commits}\n"));
-        }
-        return out;
+}
+
+fn git_detail(path: &Path, branch: Option<&str>) -> String {
+    let status = worktree::short_status(path).unwrap_or_default();
+    let log = |range: &str| worktree::log_oneline(path, range, 15).unwrap_or_default();
+    let unpushed = match branch {
+        Some(branch) if worktree::on_origin(path, branch) => log(&format!("origin/{branch}..HEAD")),
+        _ => "branch not pushed".to_string(),
+    };
+    let commits = log("origin/HEAD..HEAD");
+    let mut out = String::new();
+    if status.is_empty() {
+        out.push_str("nothing uncommitted\n");
+    } else {
+        out.push_str(&format!("uncommitted:\n{status}\n"));
     }
-    if let Some(agent) = key.strip_prefix("agent:") {
-        return Command::new("herdr")
-            .args([
-                "agent",
-                "read",
-                agent,
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                "30",
-            ])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
-            .unwrap_or_else(|e| format!("! {e}"));
+    if !unpushed.is_empty() {
+        out.push_str(&format!("\nunpushed:\n{unpushed}\n"));
     }
-    String::new()
+    if !commits.is_empty() {
+        out.push_str(&format!("\nbranch commits:\n{commits}\n"));
+    }
+    out
 }
 
 #[cfg(test)]

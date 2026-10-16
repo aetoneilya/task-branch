@@ -1,28 +1,11 @@
-use super::StatusArgs;
-use crate::client::gitlab::MrState;
-use crate::config::{Config, VaultConfig};
+use super::{StatusArgs, colors, load};
+use crate::config::Config;
+use crate::table::look::{self, Piece, Tone};
 use crate::table::view::{self, Kind, Node};
-use crate::table::{self, AgentStatus, Category, Table, Ticket, Tree};
+use crate::table::{self, RowState, Table, Tree};
 use crate::trace;
 use crate::vault::task::TaskState;
-use crate::vault::task::{Task, load_tasks};
-use std::io::IsTerminal;
 use std::sync::LazyLock;
-
-pub(super) fn vault(config: &Config) -> Result<&VaultConfig, String> {
-    config
-        .vault
-        .as_ref()
-        .ok_or_else(|| "no [vault] section in ~/.config/worktable/config.toml".to_string())
-}
-
-pub(super) fn load(config: &Config) -> Result<Vec<Task>, String> {
-    let (tasks, errors) = load_tasks(vault(config)?);
-    for err in errors {
-        eprintln!("skipped {err}");
-    }
-    Ok(tasks)
-}
 
 pub(super) fn cli_status(config: &Config, args: StatusArgs) -> Result<(), String> {
     let tasks = trace::time("tasks", || load(config))?;
@@ -48,28 +31,35 @@ struct Cell {
 
 impl Cell {
     fn plain(text: impl Into<String>) -> Cell {
-        Cell::styled(text, Style::Plain)
+        Cell::styled(text, Tone::Plain)
     }
 
-    fn styled(text: impl Into<String>, style: Style) -> Cell {
+    fn styled(text: impl Into<String>, tone: Tone) -> Cell {
         let text = text.into();
         Cell {
-            rendered: paint(&text, style),
+            rendered: paint(&text, tone),
             text,
         }
     }
 
+    fn pieces(pieces: impl IntoIterator<Item = Piece>) -> Cell {
+        let mut cell = Cell::default();
+        for piece in pieces {
+            cell.push(piece.into());
+        }
+        cell
+    }
+
     /// A terminal hyperlink, on a terminal only: piped output stays plain text.
-    fn link(text: impl Into<String>, url: &str, style: Style) -> Cell {
-        let text = text.into();
-        let painted = paint(&text, style);
+    fn link(piece: Piece, url: &str) -> Cell {
+        let painted = paint(&piece.text, piece.tone);
         Cell {
             rendered: if *COLOR {
                 hyperlink(url, &painted)
             } else {
                 painted
             },
-            text,
+            text: piece.text,
         }
     }
 
@@ -90,17 +80,10 @@ impl Cell {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Style {
-    Plain,
-    Bold,
-    Dim,
-    Green,
-    Yellow,
-    Blue,
-    Cyan,
-    Magenta,
-    Red,
+impl From<Piece> for Cell {
+    fn from(piece: Piece) -> Cell {
+        Cell::styled(piece.text, piece.tone)
+    }
 }
 
 /// An OSC 8 terminal hyperlink.
@@ -108,21 +91,20 @@ fn hyperlink(url: &str, text: &str) -> String {
     format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, text)
 }
 
-static COLOR: LazyLock<bool> =
-    LazyLock::new(|| std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none());
+static COLOR: LazyLock<bool> = LazyLock::new(|| colors(&std::io::stdout()));
 
-/// Colors only on a terminal, and never with NO_COLOR set.
-fn paint(text: &str, style: Style) -> String {
-    let code = match style {
-        Style::Plain => return text.to_string(),
-        Style::Bold => "1",
-        Style::Dim => "2",
-        Style::Green => "32",
-        Style::Yellow => "33",
-        Style::Blue => "34",
-        Style::Magenta => "35",
-        Style::Cyan => "36",
-        Style::Red => "1;31",
+/// `text` in the tone's ANSI color, when stdout takes colors.
+fn paint(text: &str, tone: Tone) -> String {
+    let code = match tone {
+        Tone::Plain => return text.to_string(),
+        Tone::Bold => "1",
+        Tone::Dim => "2",
+        Tone::Green => "32",
+        Tone::Yellow => "33",
+        Tone::Blue => "34",
+        Tone::Magenta => "35",
+        Tone::Cyan => "36",
+        Tone::Red => "1;31",
     };
     if *COLOR && !text.is_empty() {
         format!("\x1b[{code}m{text}\x1b[0m")
@@ -132,28 +114,6 @@ fn paint(text: &str, style: Style) -> String {
 }
 
 const NAME_WIDTH: usize = 46;
-
-fn state_cell(state: &str) -> Cell {
-    let (mark, style) = match state {
-        "active" => ("●", Style::Green),
-        "review" => ("◐", Style::Yellow),
-        "finished" => ("◆", Style::Magenta),
-        "done" => ("✓", Style::Dim),
-        "no ticket" => ("◌", Style::Dim),
-        _ => ("○", Style::Dim),
-    };
-    Cell::styled(format!("{mark} {state}"), style)
-}
-
-/// A ticket's Jira status, colored by its category.
-fn status_cell(ticket: &Ticket, mark: &str) -> Cell {
-    let style = match ticket.category {
-        Category::Done => Style::Green,
-        Category::InProgress => Style::Yellow,
-        Category::New | Category::Unknown => Style::Dim,
-    };
-    Cell::styled(format!("{mark}{}", ticket.status), style)
-}
 
 /// The view as compact rows: a root (task, loose ticket, worktree without a
 /// ticket) with its state, then its worktrees with their ticket keys, MR and
@@ -166,6 +126,7 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
             all,
             filter: "",
             tag,
+            hide_tickets: !all,
         },
     );
     let mut rows: Vec<[Cell; 4]> = Vec::new();
@@ -174,10 +135,10 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
 
     for node in &nodes {
         match &node.kind {
-            Kind::Header => {
+            Kind::Header(section) => {
                 rows.push(Default::default());
                 rows.push([
-                    Cell::styled(format!("── {}", node.title()), Style::Dim),
+                    Cell::styled(format!("── {}", section.title()), Tone::Dim),
                     Cell::default(),
                     Cell::default(),
                     Cell::default(),
@@ -188,47 +149,49 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
                 if !row.task.done && row.current_state() == Some(TaskState::Finished) {
                     finished_tasks.push(row.task.name.clone());
                 }
-                let mut name = Cell::styled(truncate(&row.task.name, NAME_WIDTH), Style::Bold);
+                let mut name = Cell::styled(truncate(&row.task.name, NAME_WIDTH), Tone::Bold);
                 let tags: String = row.task.tags.iter().map(|t| format!(" #{t}")).collect();
                 let room = NAME_WIDTH.saturating_sub(name.text.chars().count());
                 if !tags.is_empty() && room > 2 {
-                    name.push(Cell::styled(truncate(&tags, room), Style::Dim));
+                    name.push(Cell::styled(truncate(&tags, room), Tone::Dim));
                 }
                 rows.push([
                     name,
-                    state_cell(row.state_label()),
+                    look::state(row.row_state(), true).into(),
                     Cell::default(),
                     Cell::default(),
                 ]);
-                rows.extend(children(table, node, None, all, ""));
+                rows.extend(children(table, node, None, ""));
             }
             Kind::Loose(i) => {
                 loose_shown += 1;
-                let key = &table.loose[*i].key;
+                let loose = &table.loose[*i];
+                let key = &loose.key;
                 let ticket = table.tickets.get(key);
-                let mut name = Cell::link(key, &table.ticket_url(key), Style::Cyan);
-                let summary = ticket.map(|t| t.summary.as_str()).unwrap_or("");
+                let mut name = Cell::link(look::key(key), &table.ticket_url(key));
                 let room = NAME_WIDTH.saturating_sub(key.chars().count() + 1);
-                name.push(Cell::plain(format!(" {}", truncate(summary, room))));
+                name.push(Cell::plain(format!(
+                    " {}",
+                    truncate(&look::summary(ticket), room)
+                )));
                 // nothing done on it yet: its Jira status says more
-                let state = match (table.loose_state(*i), ticket) {
-                    (Some(state), _) => state_cell(state.as_str()),
-                    (None, Some(ticket)) => status_cell(ticket, "○ "),
-                    (None, None) => state_cell(""),
+                let state = match (loose.state, ticket) {
+                    (None, Some(ticket)) => look::status(ticket).after("○ "),
+                    (state, _) => look::state(state.map(RowState::Task), true),
                 };
-                rows.push([name, state, Cell::default(), Cell::default()]);
-                rows.extend(children(table, node, Some(key), all, ""));
+                rows.push([name, state.into(), Cell::default(), Cell::default()]);
+                rows.extend(children(table, node, Some(key), ""));
             }
             Kind::Tree(t) => rows.push([
                 tree_name(table.tree(*t), NAME_WIDTH),
-                state_cell("no ticket"),
+                look::no_ticket().into(),
                 mr_cell(table, node),
                 agents_cell(table, node),
             ]),
             Kind::Mr(m) => rows.push([
                 Cell::styled(
-                    truncate(&table.mr(*m).short_title(), NAME_WIDTH),
-                    Style::Dim,
+                    truncate(&look::mr_title(table.mr(*m)), NAME_WIDTH),
+                    Tone::Dim,
                 ),
                 Cell::default(),
                 mr_link(table, *m),
@@ -239,9 +202,9 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
     }
 
     if rows.is_empty() {
-        println!("{}", paint("no active work", Style::Dim));
+        println!("{}", paint("no active work", Tone::Dim));
     } else {
-        let header = ["", "", "MR", "AGENT"].map(|h| Cell::styled(h, Style::Dim));
+        let header = ["", "", "MR", "AGENT"].map(|h| Cell::styled(h, Tone::Dim));
         print_rows(std::iter::once(&header).chain(&rows));
     }
     if all {
@@ -254,7 +217,7 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
     if !finished_tasks.is_empty() {
         footer.push(format!(
             "{} {}",
-            paint("finished, can be closed:", Style::Dim),
+            paint("finished, can be closed:", Tone::Dim),
             finished_tasks.join(", ")
         ));
     }
@@ -263,9 +226,9 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
             "{} {}",
             paint(
                 &format!("{finished_trees} worktree(s) with merged MRs →"),
-                Style::Dim
+                Tone::Dim
             ),
-            paint("wt done --merged", Style::Bold)
+            paint("wt done --merged", Tone::Bold)
         ));
     }
     if hidden > 0 && tag.is_none() {
@@ -273,9 +236,9 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
             "{} {}",
             paint(
                 &format!("{hidden} ticket(s) and MR(s) without activity →"),
-                Style::Dim
+                Tone::Dim
             ),
-            paint("wt status --all", Style::Bold)
+            paint("wt status --all", Tone::Bold)
         ));
     }
     if !footer.is_empty() {
@@ -303,15 +266,12 @@ fn print_rows<'a, const N: usize>(rows: impl Iterator<Item = &'a [Cell; N]> + Cl
     }
 }
 
-/// `!iid`, linked and colored by the MR's state.
+/// `!iid`, linked and colored by the MR's state, then what an open one waits on.
 fn mr_link(table: &Table, m: usize) -> Cell {
-    let mr = &table.mr(m).mr;
-    let style = match mr.state() {
-        MrState::Opened => Style::Blue,
-        MrState::Merged => Style::Magenta,
-        MrState::Closed | MrState::Locked | MrState::Other => Style::Dim,
-    };
-    Cell::link(format!("!{}", mr.iid()), mr.web_url(), style)
+    let mr = table.mr(m);
+    let mut cell = Cell::link(look::mr_iid(mr, true), mr.mr.web_url());
+    cell.push(Cell::pieces(look::review(mr)));
+    cell
 }
 
 /// The MR the view hangs under a worktree.
@@ -327,49 +287,21 @@ fn mr_cell(table: &Table, tree: &Node) -> Cell {
     Cell::join(links, " ")
 }
 
-/// Lines under a root, each prefixed by `indent`: its worktrees, then its
-/// tickets' and its own MRs. Keys are listed but the root's own `key`.
-fn children(
-    table: &Table,
-    node: &Node,
-    key: Option<&str>,
-    all: bool,
-    indent: &str,
-) -> Vec<[Cell; 4]> {
-    let mut items: Vec<&Node> = node
+/// Lines under a root or a ticket, each prefixed by `indent`: its worktrees,
+/// then its tickets (with `--all`) and MRs. Keys are listed but the root's own `key`.
+fn children(table: &Table, node: &Node, key: Option<&str>, indent: &str) -> Vec<[Cell; 4]> {
+    let (trees, rest): (Vec<&Node>, Vec<&Node>) = node
         .children
         .iter()
-        .filter(|n| matches!(n.kind, Kind::Tree(_)))
-        .collect();
-    let mut mrs: Vec<usize> = Vec::new();
-    for child in &node.children {
-        match child.kind {
-            Kind::Ticket(_) if all => items.push(child),
-            // an MR with the keys of two tickets is under both
-            Kind::Ticket(_) => {
-                for mr in &child.children {
-                    if let Kind::Mr(m) = mr.kind
-                        && !mrs.contains(&m)
-                    {
-                        mrs.push(m);
-                        items.push(mr);
-                    }
-                }
-            }
-            Kind::Mr(m) if !mrs.contains(&m) => {
-                mrs.push(m);
-                items.push(child);
-            }
-            _ => {}
-        }
-    }
+        .partition(|n| matches!(n.kind, Kind::Tree(_)));
+    let items: Vec<&Node> = trees.into_iter().chain(rest).collect();
 
     let room = NAME_WIDTH.saturating_sub(indent.chars().count() + 3);
     let keys_cell = |keys: &[String]| {
         let links = keys
             .iter()
             .filter(|k| Some(k.as_str()) != key)
-            .map(|k| Cell::link(k, &table.ticket_url(k), Style::Cyan))
+            .map(|k| Cell::link(look::key(k), &table.ticket_url(k)))
             .collect();
         Cell::join(links, " ")
     };
@@ -378,7 +310,7 @@ fn children(
         let last = n + 1 == items.len();
         let mut name = Cell::styled(
             format!("{indent}{}", if last { "└─ " } else { "├─ " }),
-            Style::Dim,
+            Tone::Dim,
         );
         match &item.kind {
             Kind::Tree(t) => {
@@ -393,8 +325,8 @@ fn children(
             }
             Kind::Mr(m) => {
                 name.push(Cell::styled(
-                    truncate(&table.mr(*m).short_title(), room),
-                    Style::Dim,
+                    truncate(&look::mr_title(table.mr(*m)), room),
+                    Tone::Dim,
                 ));
                 lines.push([
                     name,
@@ -405,14 +337,16 @@ fn children(
             }
             Kind::Ticket(k) => {
                 let ticket = table.tickets.get(k);
-                name.push(Cell::link(k, &table.ticket_url(k), Style::Cyan));
-                let summary = ticket.map(|t| t.summary.as_str()).unwrap_or("");
+                name.push(Cell::link(look::key(k), &table.ticket_url(k)));
                 let room = room.saturating_sub(k.chars().count() + 1);
-                name.push(Cell::plain(format!(" {}", truncate(summary, room))));
-                let status = ticket.map(|t| status_cell(t, "")).unwrap_or_default();
+                name.push(Cell::plain(format!(
+                    " {}",
+                    truncate(&look::summary(ticket), room)
+                )));
+                let status = ticket.map(|t| look::status(t).into()).unwrap_or_default();
                 lines.push([name, status, Cell::default(), Cell::default()]);
                 let deeper = format!("{indent}{}", if last { "   " } else { "│  " });
-                lines.extend(children(table, item, Some(k), all, &deeper));
+                lines.extend(children(table, item, Some(k), &deeper));
             }
             _ => {}
         }
@@ -420,18 +354,10 @@ fn children(
     lines
 }
 
-/// The worktree's name with `+N` changed files and `↑N` unpushed commits.
+/// The worktree's name with its marks: changed files, unpushed commits, merged
+/// or quiet.
 fn tree_name(tree: &Tree, width: usize) -> Cell {
-    let mut marks = Cell::default();
-    if let Some(c) = tree.changes.filter(|&c| c > 0) {
-        marks.push(Cell::styled(format!(" +{c}"), Style::Yellow));
-    }
-    if let Some(u) = tree.unpushed.filter(|&u| u > 0) {
-        marks.push(Cell::styled(format!(" ↑{u}"), Style::Magenta));
-    }
-    if tree.finished {
-        marks.push(Cell::styled(" ✓ merged", Style::Dim));
-    }
+    let marks = Cell::pieces(look::tree_marks(tree));
     let room = width.saturating_sub(marks.text.chars().count());
     let mut cell = Cell::plain(truncate(&tree.wt.name(), room));
     cell.push(marks);
@@ -449,15 +375,10 @@ fn agents_cell(table: &Table, tree: &Node) -> Cell {
             _ => None,
         })
         .map(|agent| {
-            let style = match agent.status {
-                AgentStatus::Working => Style::Green,
-                AgentStatus::Blocked => Style::Red,
-                AgentStatus::Idle | AgentStatus::Done => Style::Blue,
-                AgentStatus::Unknown => Style::Dim,
-            };
-            let mut cell = Cell::plain(&agent.name);
-            cell.push(Cell::styled(format!(" {}", agent.status.as_str()), style));
-            cell
+            Cell::pieces([
+                Piece::plain(&agent.name),
+                look::agent_status(agent.status).after(" "),
+            ])
         })
         .collect();
     Cell::join(cells, ", ")

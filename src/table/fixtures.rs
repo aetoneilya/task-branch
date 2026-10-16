@@ -50,7 +50,6 @@ pub fn ticket(key: &str, category: Category, mine: bool) -> Ticket {
         summary: format!("summary of {key}"),
         status: format!("{category:?}"),
         category,
-        url: format!("https://jira/browse/{key}"),
         mine,
         created: "2026-10-01T00:00:00+00:00".to_string(),
     }
@@ -62,7 +61,6 @@ pub fn mr(iid: u64, branch: &str, title: &str, state: &str) -> Mr {
         "iid": iid,
         "title": title,
         "state": state,
-        "author": null,
         "web_url": format!("https://gitlab/mr/{iid}"),
         "source_branch": branch,
         "sha": null,

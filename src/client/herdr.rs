@@ -187,6 +187,22 @@ pub fn focus_tab(tab: &str) -> Result<()> {
     run_herdr(&["tab", "focus", tab]).map(|_| ())
 }
 
+/// The last `lines` lines of what the agent (a name or its pane id) printed,
+/// unwrapped.
+pub fn read_agent(target: &str, lines: usize) -> Result<String> {
+    let lines = lines.to_string();
+    let output = herdr_output(&[
+        "agent",
+        "read",
+        target,
+        "--source",
+        "recent-unwrapped",
+        "--lines",
+        &lines,
+    ])?;
+    Ok(String::from_utf8_lossy(&output).trim_end().to_string())
+}
+
 /// Switches to the agent: its workspace, its tab, then its pane — `agent focus`
 /// alone only makes the pane active inside a tab that may not be on screen.
 /// Accepts an agent name or the pane id hosting it.

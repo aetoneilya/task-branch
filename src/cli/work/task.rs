@@ -1,7 +1,7 @@
 //! `wt note`: an agent's finding appended to its task note.
 
 use super::common::{current_task, err};
-use crate::cli::table::load;
+use crate::cli::load;
 use crate::client::herdr;
 use crate::config::Config;
 use crate::table;
@@ -34,7 +34,7 @@ pub(in crate::cli) fn cli_note(config: &Config, text: Vec<String>) -> Result<(),
         chrono::Local::now().format("%Y-%m-%d")
     );
 
-    let _lock = table::lock().map_err(err)?;
+    let _lock = crate::vault::lock().map_err(err)?;
     for _ in 0..3 {
         task.note.append_agent_note(&line);
         match task.note.save() {

@@ -135,8 +135,12 @@ pub fn assemble(inputs: Inputs) -> Table {
                 .filter(|&i| mrs[i].keys.contains(&key))
                 .collect(),
             key,
+            state: None,
         })
         .collect();
+    for l in &mut loose {
+        l.state = loose_state(l, &trees, &mrs);
+    }
 
     let other_trees = free_trees
         .iter()
@@ -158,7 +162,7 @@ pub fn assemble(inputs: Inputs) -> Table {
     // active work first, newest first within a state
     rows.sort_by(|a, b| (task_rank(a), &b.task.created).cmp(&(task_rank(b), &a.task.created)));
     // worked on before in review before nothing done, newest first within each
-    let loose_rank = |l: &LooseTicket| match loose_state(l, &trees, &mrs) {
+    let loose_rank = |l: &LooseTicket| match l.state {
         Some(TaskState::Review) => 1,
         Some(_) => 0,
         None => 2,
@@ -243,7 +247,7 @@ fn task_row(
 
 /// `active` or `review` for a ticket with a live worktree or an open MR, None
 /// when nothing is done on it yet.
-pub(super) fn loose_state(loose: &LooseTicket, trees: &[Tree], mrs: &[Mr]) -> Option<TaskState> {
+fn loose_state(loose: &LooseTicket, trees: &[Tree], mrs: &[Mr]) -> Option<TaskState> {
     let live: Vec<&Tree> = loose
         .trees
         .iter()
@@ -277,7 +281,7 @@ fn task_rank(row: &TaskRow) -> u8 {
 /// | `review`   | MRs opened or merged, at least one opened, worktrees clean         |
 /// | `active`   | a worktree, an open MR or a ticket in progress                     |
 /// | `idea`     | nothing of the above                                               |
-pub(super) fn derive_state(
+fn derive_state(
     row: &TaskRow,
     tickets: &HashMap<String, Ticket>,
     mrs: &[Mr],
@@ -492,10 +496,11 @@ mod tests {
         assert!(table.tree(table.tree_index("old")).finished);
         // worked on first (in review after active), then nothing done
         assert_eq!(table.loose_keys(), vec!["UCP-5", "UCP-7", "UCP-9", "UCP-6"]);
-        assert_eq!(table.loose_state(0), Some(TaskState::Active));
-        assert_eq!(table.loose_state(1), Some(TaskState::Review));
-        assert_eq!(table.loose_state(2), None);
-        assert_eq!(table.loose_state(3), None);
+        let states: Vec<Option<TaskState>> = table.loose.iter().map(|l| l.state).collect();
+        assert_eq!(
+            states,
+            vec![Some(TaskState::Active), Some(TaskState::Review), None, None]
+        );
     }
 
     fn state_of(tickets: Vec<Ticket>, mrs: Vec<Mr>, trees: Vec<Tree>, keys: &[&str]) -> TaskState {

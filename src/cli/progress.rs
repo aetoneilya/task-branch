@@ -2,11 +2,14 @@
 
 use std::fmt::Display;
 use std::io::{IsTerminal, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// The step lines go to stderr: colored when it takes colors.
+static COLOR: LazyLock<bool> = LazyLock::new(|| super::colors(&std::io::stderr()));
 
 /// Runs `work` under a spinner: for steps that print nothing themselves.
 pub fn step<T, E: Display>(label: &str, work: impl FnOnce() -> Result<T, E>) -> Result<T, String> {
@@ -49,14 +52,15 @@ pub fn loud_step<T, E: Display>(
 
 fn finish<T, E: Display>(label: &str, started: Instant, result: Result<T, E>) -> Result<T, String> {
     let took = started.elapsed().as_secs_f64();
-    match result {
-        Ok(value) => {
-            eprintln!("\x1b[32m✓\x1b[0m {label}  {took:.1}s");
-            Ok(value)
-        }
-        Err(e) => {
-            eprintln!("\x1b[31m✗\x1b[0m {label}  {took:.1}s");
-            Err(e.to_string())
-        }
+    let (mark, color) = if result.is_ok() {
+        ("✓", "32")
+    } else {
+        ("✗", "31")
+    };
+    if *COLOR {
+        eprintln!("\x1b[{color}m{mark}\x1b[0m {label}  {took:.1}s");
+    } else {
+        eprintln!("{mark} {label}  {took:.1}s");
     }
+    result.map_err(|e| e.to_string())
 }

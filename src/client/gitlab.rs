@@ -33,6 +33,13 @@ impl GitLab {
         })
     }
 
+    /// A client with the token from `GITLAB_TOKEN`.
+    pub fn from_env(host: &str) -> Result<GitLab, String> {
+        let token =
+            std::env::var("GITLAB_TOKEN").map_err(|_| "GITLAB_TOKEN is not set".to_string())?;
+        GitLab::new(host, &token)
+    }
+
     /// `https://<host>/api/v4/projects/<project>/<path…>`; the project path is one
     /// segment, its slashes encoded.
     fn project_url(&self, project: &str, path: &[&str]) -> Result<Url, String> {

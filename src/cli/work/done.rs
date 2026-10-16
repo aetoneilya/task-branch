@@ -5,7 +5,7 @@ use super::common::{
 };
 use super::launch::close_herdr_views;
 use crate::cli::DoneArgs;
-use crate::cli::table::load;
+use crate::cli::load;
 use crate::client::gitlab::{MergeRequest, MrState};
 use crate::client::jira::{JiraClient, Transition};
 use crate::client::worktree;
@@ -106,7 +106,7 @@ fn done_task(
         }
     }
 
-    let jira = table::jira_client(config)?;
+    let jira = JiraClient::from_env(&config.jira.host)?;
     for key in &to_close {
         match close_in_jira(&jira, key) {
             Ok(status) => println!("{key} → {status}"),
@@ -132,7 +132,7 @@ fn done_task(
         }
     }
     {
-        let _lock = table::lock().map_err(err)?;
+        let _lock = crate::vault::lock().map_err(err)?;
         let mut note = Note::read(&row.task.note.path).map_err(err)?;
         note.set("done", Value::Bool(true));
         note.set(
@@ -352,7 +352,7 @@ pub(in crate::cli) fn cli_attach(
             table.tasks.swap_remove(chosen).task
         }
     };
-    let _lock = table::lock().map_err(err)?;
+    let _lock = crate::vault::lock().map_err(err)?;
     task.note.reload().map_err(err)?;
     let mut entries = task.note.strings("tickets");
     entries.push(key.to_string());

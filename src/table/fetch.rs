@@ -2,7 +2,7 @@
 //! claude transcripts; as much of it at once as the dependencies allow.
 
 use super::matching::Inputs;
-use super::{Mr, Ticket, Tree, jira_client};
+use super::{Mr, Ticket, Tree};
 use crate::client::gitlab::{GitLab, MrReview};
 use crate::client::jira::JiraClient;
 use crate::client::worktree::{self, Worktree};
@@ -65,24 +65,24 @@ pub(super) fn fetch(
     online: bool,
     cached: Option<RemoteCache>,
 ) -> Inputs {
-    let host = config.jira.host.as_str();
-    let jira = online.then(|| jira_client(config));
-    let gitlab = online.then(|| gitlab_client(config));
+    let jira = online.then(|| JiraClient::from_env(&config.jira.host));
+    let gitlab = online.then(|| GitLab::from_env(&config.gitlab.host));
     // Jira answers in about a second, so every ticket query starts at once: mine,
     // the keys of open tasks and worktree branches, and those of open MRs as soon
     // as GitLab lists them
-    let known: Vec<String> = match online {
-        true => trace::time("known keys", || known_keys(config, &tasks)),
-        false => Vec::new(),
+    let known: Vec<String> = if online {
+        trace::time("known keys", || known_keys(config, &tasks))
+    } else {
+        Vec::new()
     };
     let (mine, by_key, mrs, trees, herdr) = std::thread::scope(|scope| {
         let mine = scope.spawn(|| match &jira {
-            Some(jira) => trace::time("jira: mine", || fetch_my_tickets(jira.as_ref()?, host)),
+            Some(jira) => trace::time("jira: mine", || fetch_my_tickets(jira.as_ref()?)),
             None => Ok(HashMap::new()),
         });
         let by_key = scope.spawn(|| match &jira {
             Some(Ok(jira)) => trace::time(&format!("jira: {} known keys", known.len()), || {
-                fetch_tickets_by_key(jira, host, &known)
+                fetch_tickets_by_key(jira, &known)
             }),
             _ => HashMap::new(),
         });
@@ -120,32 +120,14 @@ pub(super) fn fetch(
     };
     let mut warnings = Vec::new();
     let complete = online && tickets.is_ok() && mrs.is_ok();
-    // a service that did not answer is shown as it was last time, not as empty
     let mut fallback = (!complete && online).then(RemoteCache::load).flatten();
-    let tickets = tickets.unwrap_or_else(|err| {
-        let cached = fallback.as_mut().map(|c| std::mem::take(&mut c.tickets));
-        warnings.push(format!(
-            "Jira: {err}{}",
-            if cached.is_some() {
-                " — showing cached"
-            } else {
-                ""
-            }
-        ));
-        cached.unwrap_or_default()
-    });
-    let mrs = mrs.unwrap_or_else(|err| {
-        let cached = fallback.as_mut().map(|c| std::mem::take(&mut c.mrs));
-        warnings.push(format!(
-            "GitLab: {err}{}",
-            if cached.is_some() {
-                " — showing cached"
-            } else {
-                ""
-            }
-        ));
-        cached.unwrap_or_default()
-    });
+    let tickets = or_cached(
+        "Jira",
+        tickets,
+        fallback.as_mut().map(|c| std::mem::take(&mut c.tickets)),
+        &mut warnings,
+    );
+    let mrs = or_cached("GitLab", mrs, fallback.map(|c| c.mrs), &mut warnings);
     if complete {
         RemoteCache::save(&tickets, &mrs);
     }
@@ -167,9 +149,23 @@ pub(super) fn fetch(
     }
 }
 
-fn gitlab_client(config: &Config) -> Result<GitLab, String> {
-    let token = std::env::var("GITLAB_TOKEN").map_err(|_| "GITLAB_TOKEN is not set".to_string())?;
-    GitLab::new(&config.gitlab.host, &token)
+/// A service that did not answer is shown as it was last time, not as empty,
+/// with a warning either way.
+fn or_cached<T: Default>(
+    service: &str,
+    fetched: Result<T, String>,
+    cached: Option<T>,
+    warnings: &mut Vec<String>,
+) -> T {
+    fetched.unwrap_or_else(|err| {
+        let shown = if cached.is_some() {
+            " — showing cached"
+        } else {
+            ""
+        };
+        warnings.push(format!("{service}: {err}{shown}"));
+        cached.unwrap_or_default()
+    })
 }
 
 /// `<main checkout>/.claude/worktrees` of every configured repo.
@@ -237,24 +233,24 @@ fn known_keys(config: &Config, tasks: &[Task]) -> Vec<String> {
 }
 
 /// My tickets that are not done (resolution alone misses Declined/Cancelled).
-fn fetch_my_tickets(jira: &JiraClient, host: &str) -> Result<HashMap<String, Ticket>, String> {
+fn fetch_my_tickets(jira: &JiraClient) -> Result<HashMap<String, Ticket>, String> {
     let issues = jira
         .search_issues_brief("assignee = currentUser() AND statusCategory != Done", 200)
         .map_err(|err| err.to_string())?;
     Ok(issues
         .iter()
-        .map(|issue| (issue.key.clone(), Ticket::from_issue(issue, host, true)))
+        .map(|issue| (issue.key.clone(), Ticket::from_issue(issue, true)))
         .collect())
 }
 
 /// Best effort: tickets that can't be fetched are shown by key only.
-fn fetch_tickets_by_key(jira: &JiraClient, host: &str, keys: &[String]) -> HashMap<String, Ticket> {
+fn fetch_tickets_by_key(jira: &JiraClient, keys: &[String]) -> HashMap<String, Ticket> {
     let mut tickets = HashMap::new();
     for chunk in keys.chunks(100) {
         match jira.search_issues_brief(&format!("key in ({})", chunk.join(",")), chunk.len()) {
             Ok(issues) => {
                 for issue in &issues {
-                    tickets.insert(issue.key.clone(), Ticket::from_issue(issue, host, false));
+                    tickets.insert(issue.key.clone(), Ticket::from_issue(issue, false));
                 }
             }
             // one unknown key fails the whole query: fall back to one request per
@@ -269,7 +265,7 @@ fn fetch_tickets_by_key(jira: &JiraClient, host: &str, keys: &[String]) -> HashM
                     handles
                         .into_iter()
                         .filter_map(|h| h.join().ok().flatten())
-                        .map(|issue| Ticket::from_issue(&issue, host, false))
+                        .map(|issue| Ticket::from_issue(&issue, false))
                         .collect()
                 });
                 tickets.extend(found.into_iter().map(|t| (t.key.clone(), t)));
@@ -325,7 +321,7 @@ fn fetch_mrs(
         }
         let tickets = scope.spawn(move || match jira {
             Some(Ok(jira)) => trace::time(&format!("jira: {} MR keys", keys.len()), || {
-                fetch_tickets_by_key(jira, &config.jira.host, &keys)
+                fetch_tickets_by_key(jira, &keys)
             }),
             _ => HashMap::new(),
         });

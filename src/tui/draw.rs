@@ -1,9 +1,8 @@
 //! Drawing: the task tree, prompt line, footer hints, help.
 
-use super::{
-    App, MESSAGE_FOR, PREVIEW_MIN_WIDTH, Prompt,
-    rows::{Kind, clean},
-};
+use super::{App, MESSAGE_FOR, PREVIEW_MIN_WIDTH, Prompt, rows::Kind};
+use crate::table::look::clean;
+use crate::table::view::Section;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -114,7 +113,7 @@ impl App {
                     keys.push(("c", "sessions".into()));
                     keys.push(("d", "close task".into()));
                 }
-                Kind::Loose(i) if !self.loose_has_work(*i) => {
+                Kind::Loose(i) if self.table.loose[*i].state.is_none() => {
                     keys.push(("⏎", "start task".into()));
                     keys.push(("a", "attach to task".into()));
                     keys.push(("b", "jira".into()));
@@ -132,7 +131,7 @@ impl App {
                     keys.push(("s", "start".into()));
                 }
                 Kind::Mr(_) => keys.push(("⏎", "open MR".into())),
-                Kind::Header => {}
+                Kind::Header(_) => {}
                 Kind::Tree(t) => {
                     let tree = self.table.tree(*t);
                     if !tree.agents.is_empty() {
@@ -215,9 +214,9 @@ impl App {
         let mut counts = [0usize; 3];
         let mut section = 0;
         for row in self.rows.iter().filter(|r| r.parent.is_none()) {
-            match row.id.as_str() {
-                "header:no task" => section = 1,
-                "header:assigned to me in Jira" => section = 2,
+            match row.kind {
+                Kind::Header(Section::NoTask) => section = 1,
+                Kind::Header(Section::Assigned) => section = 2,
                 _ => counts[section] += 1,
             }
         }

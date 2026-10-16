@@ -11,7 +11,8 @@ mod rows;
 use crate::client::herdr;
 use crate::config::Config;
 use crate::table::{self, Table};
-use crate::vault::task::load_tasks;
+use crate::vault::{self, note::NoteError};
+use details::Detail;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::widgets::ListState;
@@ -50,8 +51,8 @@ enum Prompt {
 
 enum Update {
     Table(Box<Table>, Vec<String>),
-    /// Lazily loaded details, by key.
-    Detail(String, String),
+    /// A lazily loaded detail.
+    Detail(Detail, String),
     Message(String),
     Agents(Vec<herdr::Agent>),
 }
@@ -77,8 +78,8 @@ struct App {
     refreshing: bool,
     last_refresh: Instant,
     synced: Option<chrono::DateTime<chrono::Local>>,
-    details: HashMap<String, String>,
-    pending: HashSet<String>,
+    details: HashMap<Detail, String>,
+    pending: HashSet<Detail>,
     detail_scroll: u16,
     tx: Sender<Update>,
     rx: Receiver<Update>,
@@ -91,12 +92,9 @@ struct App {
 
 impl App {
     fn new(config: Config) -> Result<App, String> {
-        let vault = config
-            .vault
-            .as_ref()
-            .ok_or("no [vault] section in ~/.config/worktable/config.toml")?;
-        let (tasks, _) = load_tasks(vault);
-        let table = table::build_cached(&config, tasks);
+        let (tasks, skipped) = vault::task::load(&config)?;
+        let mut table = table::build_cached(&config, tasks);
+        report_skipped(&mut table, &skipped);
         let (tx, rx) = channel();
         let mut app = App {
             config: Arc::new(config),
@@ -127,6 +125,9 @@ impl App {
             agents_polling: false,
         };
         app.rebuild();
+        if let Some(warning) = app.table.warnings.first() {
+            app.say(format!("! {warning}"));
+        }
         app.refresh();
         Ok(app)
     }
@@ -166,11 +167,12 @@ impl App {
         self.last_refresh = Instant::now();
         let (config, tx) = (self.config.clone(), self.tx.clone());
         std::thread::spawn(move || {
-            let Some(vault) = config.vault.as_ref() else {
+            // the config is the one `new` loaded the vault with: it does not fail here
+            let Ok((tasks, skipped)) = vault::task::load(&config) else {
                 return;
             };
-            let (tasks, _) = load_tasks(vault);
             let mut table = table::build(&config, tasks, true);
+            report_skipped(&mut table, &skipped);
             let updated = table::write_back(&mut table);
             let _ = tx.send(Update::Table(Box::new(table), updated));
         });
@@ -225,9 +227,9 @@ impl App {
                 }
                 self.rebuild();
             }
-            Update::Detail(key, text) => {
-                self.pending.remove(&key);
-                self.details.insert(key, text);
+            Update::Detail(detail, text) => {
+                self.pending.remove(&detail);
+                self.details.insert(detail, text);
             }
             Update::Message(text) => self.say(text),
             Update::Agents(agents) => {
@@ -263,7 +265,7 @@ impl App {
             if index < 0 || index as usize >= self.rows.len() {
                 return;
             }
-            if self.rows[index as usize].kind != Kind::Header {
+            if !self.rows[index as usize].kind.is_header() {
                 self.select(index as usize);
                 return;
             }
@@ -280,7 +282,7 @@ impl App {
         // a section title is never selected: the next row, or the previous one
         if let Some(i) = (index..self.rows.len())
             .chain((0..index).rev())
-            .find(|&i| self.rows[i].kind != Kind::Header)
+            .find(|&i| !self.rows[i].kind.is_header())
         {
             index = i;
         }
@@ -289,9 +291,9 @@ impl App {
             self.detail_scroll = 0;
             // agent output is live: read it again every time
             if let Kind::Agent(..) = self.rows[index].kind
-                && let Some(key) = self.detail_key(&self.rows[index].kind)
+                && let Some(detail) = self.detail(&self.rows[index].kind)
             {
-                self.details.remove(&key);
+                self.details.remove(&detail);
             }
         }
         self.list.select(Some(index));
@@ -305,4 +307,12 @@ impl App {
     fn current(&self) -> Option<&Row> {
         self.list.selected().and_then(|i| self.rows.get(i))
     }
+}
+
+/// Notes that could not be read are left out of the table, with a warning as
+/// `wt status` prints it.
+fn report_skipped(table: &mut Table, skipped: &[NoteError]) {
+    table
+        .warnings
+        .extend(skipped.iter().map(|err| format!("skipped {err}")));
 }

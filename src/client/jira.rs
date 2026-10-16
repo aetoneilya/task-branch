@@ -8,11 +8,11 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct JiraClient {
     client: Client,
     base_url: String,
-    token: String,
+    headers: HeaderMap,
 }
 
 #[derive(Debug, Error)]
@@ -22,6 +22,9 @@ pub enum JiraError {
 
     #[error("Jira answered {0}")]
     RequestResultError(StatusCode, String),
+
+    #[error("JIRA_TOKEN can't be sent in a header: {0}")]
+    BadToken(#[from] reqwest::header::InvalidHeaderValue),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, JiraError>;
@@ -34,20 +37,22 @@ impl JiraError {
 }
 
 impl JiraClient {
-    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
-        JiraClient {
+    /// The token is trimmed: one read from a file or a shell often ends in a newline.
+    pub fn new(base_url: impl Into<String>, token: &str) -> Result<Self> {
+        let mut headers = HeaderMap::new();
+        let mut auth = HeaderValue::from_str(&format!("Bearer {}", token.trim()))?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        Ok(JiraClient {
             client: Client::new(),
             base_url: base_url.into(),
-            token: token.into(),
-        }
+            headers,
+        })
     }
 
     fn auth_headers(&self) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        let auth_value = format!("Bearer {}", self.token);
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_value).unwrap());
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers
+        self.headers.clone()
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
@@ -63,7 +68,7 @@ impl JiraClient {
             let text = response.text().unwrap_or_default();
             return Err(RequestResultError(
                 status,
-                format!("Request failed ({}): {}", status, text).into(),
+                format!("Request failed ({}): {}", status, text),
             ));
         }
 
@@ -110,14 +115,6 @@ impl JiraClient {
         let result: JiraSearchResult = self.get_json(&url)?;
         Ok(result.issues)
     }
-
-    pub fn search_issues(&self, jql: &str) -> Result<Vec<JiraIssue>> {
-        let encoded_jql = urlencoding::encode(jql);
-        let url = format!("{}/rest/api/2/search?jql={}", self.base_url, encoded_jql);
-
-        let result: JiraSearchResult = self.get_json(&url)?;
-        Ok(result.issues)
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,9 +144,6 @@ struct JiraSearchResult {
 #[derive(Debug, Deserialize)]
 pub struct JiraIssue {
     pub key: String,
-    pub id: String,
-    #[serde(rename = "self")]
-    pub self_link: String,
     pub fields: JiraIssueFields,
 }
 
@@ -177,42 +171,12 @@ pub struct JiraIssueFields {
     pub summary: String,
     pub description: Option<String>,
     pub created: DateTime<FixedOffset>,
-    pub updated: DateTime<FixedOffset>,
-    pub status: Option<Status>,
-    pub assignee: Option<Assignee>,
-    pub subtasks: Option<Vec<JiraSubtask>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct JiraSubtask {
-    pub key: String,
-    pub id: String,
-    #[serde(rename = "self")]
-    pub self_link: String,
-    pub fields: JiraSubtaskFields,
-}
-
-impl JiraSubtask {
-    pub fn status(&self) -> &str {
-        self.fields
-            .status
-            .as_ref()
-            .map(|s| s.name.as_str())
-            .unwrap_or("unknown")
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct JiraSubtaskFields {
-    pub summary: String,
     pub status: Option<Status>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Status {
-    pub description: String,
     pub name: String,
-    pub id: String,
     #[serde(rename = "statusCategory")]
     pub status_category: Option<StatusCategory>,
 }
@@ -221,14 +185,4 @@ pub struct Status {
 #[derive(Debug, Deserialize)]
 pub struct StatusCategory {
     pub key: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Assignee {
-    pub name: String,
-    #[serde(rename = "emailAddress")]
-    pub email_address: String,
-    #[serde(rename = "displayName")]
-    pub display_name: String,
-    pub active: bool,
 }

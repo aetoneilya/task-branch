@@ -231,9 +231,12 @@ chosen work's worktree (picker if the task has several):
 
 ### `wt status [-t tag] [--all]`
 
-Plain-text table, the same rows as the TUI: task → tickets → MRs, worktrees with
-local changes / unpushed commits, agents; then loose ends. Also the format agents
-and scripts read, so it is kept stable.
+Plain-text table, the same rows as the TUI (both walk one view model,
+`src/table/view.rs`): task → worktrees with local changes / unpushed commits,
+their MR and agents, then MRs without a worktree; then the `no task` and
+`assigned to me in Jira` sections. Ticket rows show only with `--all`, which also
+adds what the TUI's `.` adds. Also the format agents and scripts read, so it is
+kept stable.
 
 ### Less frequent
 
@@ -258,7 +261,7 @@ it is older than a few minutes and writes changed `state`/`sessions`. Nothing
 creates tickets or notes implicitly — notes only by `wt start <name>`, tickets
 only by `wt ticket new`.
 
-`jg list / mr / switch / info / tui` are folded into the TUI.
+jg's `list`, `mr`, `switch` and `info` are folded into the TUI and removed.
 
 ## TUI
 
@@ -318,16 +321,21 @@ editing tags.
 
 ## Config
 
-`~/.config/worktable/config.toml` (jg's config is read as fallback once):
+`~/.config/worktable/config.toml` (`$XDG_CONFIG_HOME/worktable/config.toml`, or
+the path in `WORKTABLE_CONFIG`):
 
 ```toml
-vault = "~/machrist-vault"
-task_dirs = ["30-work/tasks", "30-work/projects"]
-new_task_dir = "30-work/tasks"
-
 [jira]
 host = "https://jira.vk.team"
-mine = "assignee = currentUser() AND statusCategory != Done"
+
+[gitlab]
+host = "gitlab.corp.mail.ru"
+project = "ai/ucp"          # used when no [[repo]] names a project
+
+[vault]
+path = "~/machrist-vault"
+task_dirs = ["30-work/tasks", "30-work/projects"]
+new_task_dir = "30-work/tasks"
 
 [[repo]]
 path = "~/code/vk/ucp"
@@ -335,12 +343,13 @@ gitlab_project = "ai/ucp"
 
 [workflow]
 branch_prefix = "i.udalov/"
-review_model = "claude-fable-5-1"
-done_definition = "…"
+review_model = "claude-fable-5-1"   # optional: claude's default when unset
+ide = "IntelliJ IDEA"               # optional, the default
 ```
 
 Multiple `[[repo]]` from day one: worktrees and MRs are collected per repo.
-Tokens stay in `JIRA_TOKEN` / `GITLAB_TOKEN`.
+Tokens stay in `JIRA_TOKEN` / `GITLAB_TOKEN`. `WT_TRACE=1` prints how long each
+fetch, the matching and the rendering took to stderr.
 
 ## Migration of existing notes
 

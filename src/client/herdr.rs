@@ -60,11 +60,6 @@ impl Agent {
         self.agent_session.as_ref().map(|s| s.value.as_str())
     }
 
-    pub fn label(&self) -> String {
-        let name = self.name.as_deref().unwrap_or(&self.pane_id);
-        format!("{}:{}", name, self.agent_status)
-    }
-
     pub fn runs_in(&self, dir: &Path) -> bool {
         self.cwd
             .as_deref()
@@ -228,7 +223,8 @@ pub fn start_claude(name: &str, pane: &str, claude_args: &[&str]) -> Result<()> 
     name_agent_when_up(pane, name)
 }
 
-fn shell_quote(arg: &str) -> String {
+/// `arg` as one word for sh, in single quotes.
+pub fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 

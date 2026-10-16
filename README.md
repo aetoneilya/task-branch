@@ -1,98 +1,89 @@
-# JiraGitlab (`jg`)
+# worktable (`wt`)
 
-`jg` is a CLI utility designed to simplify the workflow between **Jira** and **GitLab**.  
-It helps seamlessly switch between issues and branches, and create merge requests linked to Jira tasks.
+worktable joins Jira tickets, GitLab merge requests, git worktrees,
+[herdr](https://herdr.dev) agents and task notes in an Obsidian vault into one
+table. A task is a markdown note; its tickets, MRs, worktrees, agents and claude
+sessions are found from branch names, herdr workspaces and transcripts. `wt`
+shows the table as a TUI or as plain text and runs the daily workflow: start a
+task, add a ticket to it, go back to it, review, close. `DESIGN.md` has the
+model and the decisions.
+
+## Install
+
+```
+cargo install --path . --locked
+```
+
+## Config
+
+`~/.config/worktable/config.toml` (`$XDG_CONFIG_HOME/worktable/config.toml`, or
+the path in `WORKTABLE_CONFIG`):
+
+```toml
+[jira]
+host = "https://jira.vk.team"
+
+[gitlab]
+host = "gitlab.corp.mail.ru"
+project = "ai/ucp"
+
+[vault]
+path = "~/machrist-vault"
+task_dirs = ["30-work/tasks", "30-work/projects"]
+new_task_dir = "30-work/tasks"
+
+[[repo]]
+path = "~/code/vk/ucp"
+gitlab_project = "ai/ucp"
+
+[workflow]
+branch_prefix = "i.udalov/"
+# review_model = "claude-fable-5-1"
+# ide = "IntelliJ IDEA"
+```
+
+Tokens come from `JIRA_TOKEN` and `GITLAB_TOKEN`. `WT_TRACE=1` prints how long
+each fetch, the matching and the rendering took to stderr.
 
 ## Commands
 
 ```
-jg
-|- info [--task-key]
-|- new-task
-|- mr
-|- switch [--task-key]
-|- tui
-|- start [--key] [--name] [--branch] [--message] [--tab] [--bg]
-|- status
-|- review [name]
-|- done [name] [--merged] [--force] [--yes]
-|- list
-    |- task
-    |- mr
-    |- all (default)
+wt                         the TUI (also `wt tui`)
+wt start [<task|KEY>]      new task: note, herdr workspace, worktree tab with claude
+wt add [<task>] <KEY>      add a ticket to a task, with its own worktree tab
+wt attach <KEY> [<task>]   put a ticket into a task without a worktree
+wt select [<task|KEY>]     go back to a task: its agent, or claude resuming its session
+wt note "<text>"           (for agents) append a finding to the note's "Agent notes"
+wt status                  the table in plain text; updates `state` and `sessions` in notes
+wt migrate [--apply]       add `tickets:` to notes made before worktable
+wt review [<worktree>]     start a reviewer agent next to the worktree's agent
+wt done [<task|worktree>] [--merged] [--force] [-y]
+                           close a task (worktrees, my Jira tickets, note marked done),
+                           or remove one worktree; --merged removes every finished one
+wt completions <shell>     shell completion script
 ```
 
-## jg info [--task-key]
+`wt <command> --help` lists the options.
 
-List task details from Jira and related open merge requests from GitLab.
+## TUI
 
-## jg new-task [--task-key]
+`?` shows all keys. The main ones:
 
-Select one of your unresolved Jira issues, suggest a branch name based on the issue key and summary,
-and create or reuse the local branch.
+- `↑↓`/`jk` move, `←→`/`hl`/space fold, `/` filter, `.` all / active only
+- `⏎` focus the agent, or resume work (`wt select`)
+- `n` new task, `s` start a ticket / add one to a task, `a` attach a ticket
+- `b` browser, `o` note in Obsidian, `e` note in `$EDITOR`, `i` worktree in the IDE
+- `R` review, `d` remove a worktree / close a task
+- `w` next agent waiting for you, `p` details pane, `r` refresh, `q` quit
 
-## jg mr [--task-key] [--title] [--description]
+## herdr popup
 
-Create a merge request for the current branch. If the branch name contains a Jira key, it is used
-automatically; otherwise the command asks you to select an issue.
-
-## jg switch [--task-key]
-
-Fuzzy-pick one of your authored open merge requests and checkout its source branch locally.
-
-## jg tui
-
-Open the interactive launcher for the most common workflows: list, switch, create branch, create MR,
-and inspect task details.
-
-Example:
-
-```
->> jg info TASK-123
-
-TASK-123: some example task name from jira
-
-Task description. This is very important task.
-
-branches:
-    - author-TASK-123-branch-name [mr: opened] [issues: 2] [pipeline: failed]
-        - commit-3
-        - commit-2
-        - commit-1
-
-```
-
-## Parallel agents: worktree per task
-
-`start`, `status`, `review` and `done` run one task per git worktree, each with its own
-claude agent in a [herdr](https://herdr.dev) workspace. They rely on the `wt` script
-(worktree + herdr workspace + agent) being on `PATH`.
+In herdr's config, `prefix+t` opens the TUI as a popup; going to some work
+closes it:
 
 ```toml
-# ~/.config/jg/config.toml
-[workflow]
-branch_prefix = "i.udalov/"   # new branches: <prefix><KEY>-<name>
-# review_model = "claude-fable-5-1"
+[[keys.command]]
+key = "prefix+t"
+type = "popup"
+command = "zsh -ic 'WT_POPUP=1 exec wt'"
 ```
-
-### jg start [--key] [--name] [--branch] [--message] [--tab] [--bg]
-
-Pick a Jira issue, create `<repo>/.claude/worktrees/<name>` on a new branch from
-`origin/HEAD`, open it in a herdr workspace and start claude briefed with the issue text,
-`--message` and a definition of done. With `--name` nothing is asked, so agents can run it.
-
-### jg status
-
-All linked worktrees: branch, uncommitted / unpushed commits, live agents and the latest
-MR. Worktrees that are safe to remove are marked `→ jg done`.
-
-### jg review [name]
-
-Start a second claude next to the task's agent that reviews the branch diff and only
-reports findings.
-
-### jg done [name] [--merged]
-
-Remove the worktree, its branch and its herdr workspace. Refuses when there are
-uncommitted changes, the MR is still open, or commits exist that are neither on origin nor
-in the merged MR. `--merged` sweeps every worktree that is safe to remove.

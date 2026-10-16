@@ -1,12 +1,13 @@
-use super::hyperlink;
+use crate::client::gitlab::MrState;
 use crate::config::{Config, VaultConfig};
-use crate::table::{self, Table, Tree};
+use crate::table::view::{self, Kind, Node};
+use crate::table::{self, AgentStatus, Category, Table, Ticket, Tree};
+use crate::trace;
+use crate::vault::task::TaskState;
 use crate::vault::task::{Task, load_tasks};
 use serde_yaml::Value;
 use std::io::IsTerminal;
 use std::sync::LazyLock;
-
-const SUMMARY_WIDTH: usize = 70;
 
 pub(super) fn vault(config: &Config) -> Result<&VaultConfig, String> {
     config
@@ -29,18 +30,17 @@ pub(super) fn cli_status(
     all: bool,
     no_write: bool,
 ) -> Result<(), String> {
-    let mut table = table::build(config, load(config)?, true);
+    let tasks = trace::time("tasks", || load(config))?;
+    let mut table = trace::time("build", || table::build(config, tasks, true));
     let updated = if no_write {
         Vec::new()
     } else {
-        table::write_back(&mut table)
+        trace::time("write back", || table::write_back(&mut table))
     };
-    if all {
-        print_full(&table, tag);
-    } else {
-        print_active(&table, tag);
-    }
-    print_notes(&table, &updated);
+    trace::time("render", || {
+        print_status(&table, tag.as_deref(), all);
+        print_notes(&table, &updated);
+    });
     Ok(())
 }
 
@@ -69,7 +69,11 @@ impl Cell {
         let text = text.into();
         let painted = paint(&text, style);
         Cell {
-            rendered: if *COLOR { hyperlink(url, &painted) } else { painted },
+            rendered: if *COLOR {
+                hyperlink(url, &painted)
+            } else {
+                painted
+            },
             text,
         }
     }
@@ -104,6 +108,11 @@ enum Style {
     Red,
 }
 
+/// An OSC 8 terminal hyperlink.
+fn hyperlink(url: &str, text: &str) -> String {
+    format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, text)
+}
+
 static COLOR: LazyLock<bool> =
     LazyLock::new(|| std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none());
 
@@ -129,97 +138,109 @@ fn paint(text: &str, style: Style) -> String {
 
 const NAME_WIDTH: usize = 46;
 
-static LEADING_KEY: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"^[A-Z][A-Z0-9]+-\d+:?\s*").unwrap());
-
 fn state_cell(state: &str) -> Cell {
     let (mark, style) = match state {
         "active" => ("●", Style::Green),
         "review" => ("◐", Style::Yellow),
         "finished" => ("◆", Style::Magenta),
+        "done" => ("✓", Style::Dim),
         "no ticket" => ("◌", Style::Dim),
         _ => ("○", Style::Dim),
     };
     Cell::styled(format!("{mark} {state}"), style)
 }
 
-/// Active work as a tree: open tasks, then tickets without a task that have a
-/// worktree or an open MR, then unfinished worktrees without a ticket; under each
-/// its worktrees and the open MRs no worktree holds.
-fn print_active(table: &Table, tag: Option<String>) {
+/// A ticket's Jira status, colored by its category.
+fn status_cell(ticket: &Ticket, mark: &str) -> Cell {
+    let style = match ticket.category {
+        Category::Done => Style::Green,
+        Category::InProgress => Style::Yellow,
+        Category::New | Category::Unknown => Style::Dim,
+    };
+    Cell::styled(format!("{mark}{}", ticket.status), style)
+}
+
+/// The view as compact rows: a root (task, loose ticket, worktree without a
+/// ticket) with its state, then its worktrees with their ticket keys, MR and
+/// agents, then the MRs no worktree holds; section titles between. Ticket rows
+/// show only with `--all`: otherwise their MRs move up, the key in the keys column.
+fn print_status(table: &Table, tag: Option<&str>, all: bool) {
+    let nodes = view::build(
+        table,
+        &view::Options {
+            all,
+            filter: "",
+            tag,
+        },
+    );
     let mut rows: Vec<[Cell; 4]> = Vec::new();
     let mut finished_tasks = Vec::new();
+    let mut loose_shown = 0;
 
-    for row in table.tasks.iter().filter(|r| !r.task.done) {
-        if tag.as_ref().is_some_and(|tag| !row.task.tags.contains(tag)) {
-            continue;
-        }
-        let state = row
-            .state
-            .map(str::to_string)
-            .or_else(|| row.task.state.clone())
-            .unwrap_or_default();
-        if state == "finished" {
-            finished_tasks.push(row.task.name.clone());
-            continue;
-        }
-        let mut name = Cell::styled(truncate(&row.task.name, NAME_WIDTH), Style::Bold);
-        let tags: String = row.task.tags.iter().map(|t| format!(" #{t}")).collect();
-        let room = NAME_WIDTH.saturating_sub(name.text.chars().count());
-        if !tags.is_empty() && room > 2 {
-            name.push(Cell::styled(truncate(&tags, room), Style::Dim));
-        }
-        rows.push([name, state_cell(&state), Cell::default(), Cell::default()]);
-        rows.extend(children(table, &row.trees, &row.mrs, None));
-    }
-
-    let mut hidden = 0;
-    if tag.is_none() {
-        for loose in &table.loose {
-            let ticket = table.tickets.get(&loose.key);
-            let live_trees: Vec<usize> = loose
-                .trees
-                .iter()
-                .copied()
-                .filter(|&i| !table.tree(i).finished)
-                .collect();
-            let open: Vec<usize> = loose
-                .mrs
-                .iter()
-                .copied()
-                .filter(|&i| table.mr(i).opened())
-                .collect();
-            let closed = ticket.is_some_and(|t| t.closed());
-            if live_trees.is_empty() && (open.is_empty() || closed) {
-                hidden += 1;
-                continue;
+    for node in &nodes {
+        match &node.kind {
+            Kind::Header => {
+                rows.push(Default::default());
+                rows.push([
+                    Cell::styled(format!("── {}", node.title()), Style::Dim),
+                    Cell::default(),
+                    Cell::default(),
+                    Cell::default(),
+                ]);
             }
-            let in_review = !open.is_empty() && live_trees.iter().all(|&i| table.tree(i).clean());
-            let mut name = Cell::link(&loose.key, &table.ticket_url(&loose.key), Style::Cyan);
-            let summary = ticket.map(|t| t.summary.as_str()).unwrap_or("");
-            let room = NAME_WIDTH.saturating_sub(loose.key.chars().count() + 1);
-            name.push(Cell::plain(format!(" {}", truncate(summary, room))));
-            rows.push([
-                name,
-                state_cell(if in_review { "review" } else { "active" }),
-                Cell::default(),
-                Cell::default(),
-            ]);
-            rows.extend(children(table, &live_trees, &open, Some(&loose.key)));
-        }
-        for &i in &table.other_trees {
-            let tree = table.tree(i);
-            if tree.finished {
-                continue;
+            Kind::Task(i) => {
+                let row = &table.tasks[*i];
+                if !row.task.done && row.current_state() == Some(TaskState::Finished) {
+                    finished_tasks.push(row.task.name.clone());
+                }
+                let mut name = Cell::styled(truncate(&row.task.name, NAME_WIDTH), Style::Bold);
+                let tags: String = row.task.tags.iter().map(|t| format!(" #{t}")).collect();
+                let room = NAME_WIDTH.saturating_sub(name.text.chars().count());
+                if !tags.is_empty() && room > 2 {
+                    name.push(Cell::styled(truncate(&tags, room), Style::Dim));
+                }
+                rows.push([
+                    name,
+                    state_cell(row.state_label()),
+                    Cell::default(),
+                    Cell::default(),
+                ]);
+                rows.extend(children(table, node, None, all, ""));
             }
-            rows.push([
-                tree_name(tree, NAME_WIDTH),
+            Kind::Loose(i) => {
+                loose_shown += 1;
+                let key = &table.loose[*i].key;
+                let ticket = table.tickets.get(key);
+                let mut name = Cell::link(key, &table.ticket_url(key), Style::Cyan);
+                let summary = ticket.map(|t| t.summary.as_str()).unwrap_or("");
+                let room = NAME_WIDTH.saturating_sub(key.chars().count() + 1);
+                name.push(Cell::plain(format!(" {}", truncate(summary, room))));
+                // nothing done on it yet: its Jira status says more
+                let state = match (table.loose_state(*i), ticket) {
+                    (Some(state), _) => state_cell(state.as_str()),
+                    (None, Some(ticket)) => status_cell(ticket, "○ "),
+                    (None, None) => state_cell(""),
+                };
+                rows.push([name, state, Cell::default(), Cell::default()]);
+                rows.extend(children(table, node, Some(key), all, ""));
+            }
+            Kind::Tree(t) => rows.push([
+                tree_name(table.tree(*t), NAME_WIDTH),
                 state_cell("no ticket"),
-                open_mrs(table, &tree.mr.into_iter().collect::<Vec<_>>()),
-                agents_cell(table, &[i]),
-            ]);
+                mr_cell(table, node),
+                agents_cell(table, node),
+            ]),
+            Kind::Mr(m) => rows.push([
+                Cell::styled(
+                    truncate(&table.mr(*m).short_title(), NAME_WIDTH),
+                    Style::Dim,
+                ),
+                Cell::default(),
+                mr_link(table, *m),
+                Cell::default(),
+            ]),
+            Kind::Ticket(_) | Kind::Agent(..) => {}
         }
-        hidden += table.other_mrs.len();
     }
 
     if rows.is_empty() {
@@ -228,8 +249,12 @@ fn print_active(table: &Table, tag: Option<String>) {
         let header = ["", "", "MR", "AGENT"].map(|h| Cell::styled(h, Style::Dim));
         print_rows(std::iter::once(&header).chain(&rows));
     }
+    if all {
+        return;
+    }
 
     let finished_trees = table.trees.iter().filter(|t| t.finished).count();
+    let hidden = table.loose.len() - loose_shown + table.other_mrs.len();
     let mut footer = Vec::new();
     if !finished_tasks.is_empty() {
         footer.push(format!(
@@ -248,7 +273,7 @@ fn print_active(table: &Table, tag: Option<String>) {
             paint("wt done --merged", Style::Bold)
         ));
     }
-    if hidden > 0 {
+    if hidden > 0 && tag.is_none() {
         footer.push(format!(
             "{} {}",
             paint(
@@ -283,46 +308,68 @@ fn print_rows<'a, const N: usize>(rows: impl Iterator<Item = &'a [Cell; N]> + Cl
     }
 }
 
-fn open_mrs(table: &Table, mrs: &[usize]) -> Cell {
-    let cells = mrs
-        .iter()
-        .map(|&i| &table.mr(i).mr)
-        .filter(|mr| mr.state() == "opened")
-        .map(|mr| Cell::link(format!("!{}", mr.iid()), mr.web_url(), Style::Blue))
-        .collect();
-    Cell::join(cells, " ")
+/// `!iid`, linked and colored by the MR's state.
+fn mr_link(table: &Table, m: usize) -> Cell {
+    let mr = &table.mr(m).mr;
+    let style = match mr.state() {
+        MrState::Opened => Style::Blue,
+        MrState::Merged => Style::Magenta,
+        MrState::Closed | MrState::Locked | MrState::Other => Style::Dim,
+    };
+    Cell::link(format!("!{}", mr.iid()), mr.web_url(), style)
 }
 
-/// Branch lines under a root: its unfinished worktrees, busiest first, each with
-/// its ticket keys (but the root's own `key`), open MR and agents; then the open
-/// MRs no worktree holds, the ticket key moved from the title to the keys column.
-fn children(table: &Table, trees: &[usize], mrs: &[usize], key: Option<&str>) -> Vec<[Cell; 4]> {
-    let mut live: Vec<usize> = trees
+/// The MR the view hangs under a worktree.
+fn mr_cell(table: &Table, tree: &Node) -> Cell {
+    let links = tree
+        .children
         .iter()
-        .copied()
-        .filter(|&i| !table.tree(i).finished)
+        .filter_map(|n| match n.kind {
+            Kind::Mr(m) => Some(mr_link(table, m)),
+            _ => None,
+        })
         .collect();
-    live.sort_by_key(|&i| {
-        let t = table.tree(i);
-        (
-            std::cmp::Reverse(!t.agents.is_empty()),
-            std::cmp::Reverse(t.changes.unwrap_or(0)),
-            t.wt.name(),
-        )
-    });
-    let held: Vec<usize> = live.iter().filter_map(|&i| table.tree(i).mr).collect();
-    let loose_mrs: Vec<usize> = mrs
-        .iter()
-        .copied()
-        .filter(|&i| table.mr(i).opened() && !held.contains(&i))
-        .collect();
+    Cell::join(links, " ")
+}
 
-    let count = live.len() + loose_mrs.len();
-    let branch = |n: usize| {
-        let glyph = if n + 1 == count { "└─ " } else { "├─ " };
-        Cell::styled(glyph, Style::Dim)
-    };
-    let room = NAME_WIDTH - 3;
+/// Lines under a root, each prefixed by `indent`: its worktrees, then its
+/// tickets' and its own MRs. Keys are listed but the root's own `key`.
+fn children(
+    table: &Table,
+    node: &Node,
+    key: Option<&str>,
+    all: bool,
+    indent: &str,
+) -> Vec<[Cell; 4]> {
+    let mut items: Vec<&Node> = node
+        .children
+        .iter()
+        .filter(|n| matches!(n.kind, Kind::Tree(_)))
+        .collect();
+    let mut mrs: Vec<usize> = Vec::new();
+    for child in &node.children {
+        match child.kind {
+            Kind::Ticket(_) if all => items.push(child),
+            // an MR with the keys of two tickets is under both
+            Kind::Ticket(_) => {
+                for mr in &child.children {
+                    if let Kind::Mr(m) = mr.kind
+                        && !mrs.contains(&m)
+                    {
+                        mrs.push(m);
+                        items.push(mr);
+                    }
+                }
+            }
+            Kind::Mr(m) if !mrs.contains(&m) => {
+                mrs.push(m);
+                items.push(child);
+            }
+            _ => {}
+        }
+    }
+
+    let room = NAME_WIDTH.saturating_sub(indent.chars().count() + 3);
     let keys_cell = |keys: &[String]| {
         let links = keys
             .iter()
@@ -332,28 +379,48 @@ fn children(table: &Table, trees: &[usize], mrs: &[usize], key: Option<&str>) ->
         Cell::join(links, " ")
     };
     let mut lines = Vec::new();
-    for (n, &i) in live.iter().enumerate() {
-        let tree = table.tree(i);
-        let mut name = branch(n);
-        name.push(tree_name(tree, room));
-        lines.push([
-            name,
-            keys_cell(&tree.keys),
-            open_mrs(table, &tree.mr.into_iter().collect::<Vec<_>>()),
-            agents_cell(table, &[i]),
-        ]);
-    }
-    for (n, &i) in loose_mrs.iter().enumerate() {
-        let mut name = branch(live.len() + n);
-        let title = table.mr(i).mr.title();
-        let title = LEADING_KEY.replace(title, "");
-        name.push(Cell::styled(truncate(&title, room), Style::Dim));
-        lines.push([
-            name,
-            keys_cell(&table.mr(i).keys),
-            open_mrs(table, &[i]),
-            Cell::default(),
-        ]);
+    for (n, item) in items.iter().enumerate() {
+        let last = n + 1 == items.len();
+        let mut name = Cell::styled(
+            format!("{indent}{}", if last { "└─ " } else { "├─ " }),
+            Style::Dim,
+        );
+        match &item.kind {
+            Kind::Tree(t) => {
+                let tree = table.tree(*t);
+                name.push(tree_name(tree, room));
+                lines.push([
+                    name,
+                    keys_cell(&tree.keys),
+                    mr_cell(table, item),
+                    agents_cell(table, item),
+                ]);
+            }
+            Kind::Mr(m) => {
+                name.push(Cell::styled(
+                    truncate(&table.mr(*m).short_title(), room),
+                    Style::Dim,
+                ));
+                lines.push([
+                    name,
+                    keys_cell(&table.mr(*m).keys),
+                    mr_link(table, *m),
+                    Cell::default(),
+                ]);
+            }
+            Kind::Ticket(k) => {
+                let ticket = table.tickets.get(k);
+                name.push(Cell::link(k, &table.ticket_url(k), Style::Cyan));
+                let summary = ticket.map(|t| t.summary.as_str()).unwrap_or("");
+                let room = room.saturating_sub(k.chars().count() + 1);
+                name.push(Cell::plain(format!(" {}", truncate(summary, room))));
+                let status = ticket.map(|t| status_cell(t, "")).unwrap_or_default();
+                lines.push([name, status, Cell::default(), Cell::default()]);
+                let deeper = format!("{indent}{}", if last { "   " } else { "│  " });
+                lines.extend(children(table, item, Some(k), all, &deeper));
+            }
+            _ => {}
+        }
     }
     lines
 }
@@ -367,74 +434,38 @@ fn tree_name(tree: &Tree, width: usize) -> Cell {
     if let Some(u) = tree.unpushed.filter(|&u| u > 0) {
         marks.push(Cell::styled(format!(" ↑{u}"), Style::Magenta));
     }
+    if tree.finished {
+        marks.push(Cell::styled(" ✓ merged", Style::Dim));
+    }
     let room = width.saturating_sub(marks.text.chars().count());
     let mut cell = Cell::plain(truncate(&tree.wt.name(), room));
     cell.push(marks);
     cell
 }
 
-/// Agents as `name status`, the status colored by what it needs from me.
-fn agents_cell(table: &Table, trees: &[usize]) -> Cell {
-    let cells = trees
+/// The worktree's agents as `name status`, the status colored by what it needs
+/// from me.
+fn agents_cell(table: &Table, tree: &Node) -> Cell {
+    let cells = tree
+        .children
         .iter()
-        .flat_map(|&i| &table.tree(i).agents)
-        .map(|label| {
-            let (name, status) = label.rsplit_once(':').unwrap_or((label, ""));
-            let style = match status {
-                "working" => Style::Green,
-                "blocked" => Style::Red,
-                "idle" | "done" => Style::Blue,
-                _ => Style::Dim,
+        .filter_map(|n| match n.kind {
+            Kind::Agent(t, a) => Some(&table.tree(t).agents[a]),
+            _ => None,
+        })
+        .map(|agent| {
+            let style = match agent.status {
+                AgentStatus::Working => Style::Green,
+                AgentStatus::Blocked => Style::Red,
+                AgentStatus::Idle | AgentStatus::Done => Style::Blue,
+                AgentStatus::Unknown => Style::Dim,
             };
-            let mut cell = Cell::plain(name);
-            cell.push(Cell::styled(format!(" {status}"), style));
+            let mut cell = Cell::plain(&agent.name);
+            cell.push(Cell::styled(format!(" {}", agent.status.as_str()), style));
             cell
         })
         .collect();
     Cell::join(cells, ", ")
-}
-
-/// Everything: tasks with all their tickets, MRs and worktrees, every ticket and
-/// MR without a task.
-fn print_full(table: &Table, tag: Option<String>) {
-    let mut out = Vec::new();
-    for row in &table.tasks {
-        if let Some(tag) = &tag {
-            if !row.task.tags.iter().any(|t| t == tag) {
-                continue;
-            }
-        }
-        print_task(&mut out, &table, row);
-    }
-
-    if tag.is_none() {
-        if !table.loose.is_empty() {
-            out.push("Tickets without a task".to_string());
-            for loose in &table.loose {
-                print_ticket(&mut out, &table, &loose.key, &loose.mrs, "  ");
-                for &i in &loose.trees {
-                    out.push(format!("    {}", tree_line(table.tree(i))));
-                }
-            }
-            out.push(String::new());
-        }
-        if !table.other_trees.is_empty() || !table.other_mrs.is_empty() {
-            out.push("Without a ticket".to_string());
-            for &i in &table.other_trees {
-                out.push(format!("  {}", tree_line(table.tree(i))));
-            }
-            for &i in &table.other_mrs {
-                let mr = &table.mr(i).mr;
-                out.push(format!("  {}  {}", mr_link(&table, i), mr.title()));
-            }
-            out.push(String::new());
-        }
-    }
-
-    while out.last().is_some_and(|l| l.is_empty()) {
-        out.pop();
-    }
-    println!("{}", out.join("\n"));
 }
 
 fn print_notes(table: &Table, updated: &[String]) {
@@ -462,105 +493,6 @@ fn print_notes(table: &Table, updated: &[String]) {
     if !out.is_empty() {
         println!("\n{}", out.join("\n"));
     }
-}
-
-fn print_task(out: &mut Vec<String>, table: &Table, row: &table::TaskRow) {
-    let task = &row.task;
-    let state = if task.done {
-        "done".to_string()
-    } else {
-        row.state
-            .map(str::to_string)
-            .or_else(|| task.state.clone())
-            .unwrap_or_default()
-    };
-    let marker = match state.as_str() {
-        "done" => "✓",
-        "finished" => "◆",
-        "review" => "◐",
-        "active" => "●",
-        _ => "○",
-    };
-    let tags: String = task.tags.iter().map(|t| format!("  #{t}")).collect();
-    out.push(format!("{marker} {}  {state}{tags}", task.name));
-
-    let mut shown_mrs: Vec<usize> = Vec::new();
-    for key in &task.tickets {
-        let mrs: Vec<usize> = row
-            .mrs
-            .iter()
-            .copied()
-            .filter(|&i| table.mr(i).keys.contains(key))
-            .collect();
-        print_ticket(out, table, key, &mrs, "  ");
-        shown_mrs.extend(mrs);
-    }
-    let keyless: Vec<usize> = row
-        .mrs
-        .iter()
-        .copied()
-        .filter(|i| !shown_mrs.contains(i))
-        .collect();
-    for i in keyless {
-        out.push(format!(
-            "  {}  {}",
-            mr_link(table, i),
-            table.mr(i).mr.title()
-        ));
-    }
-    for &i in &row.trees {
-        out.push(format!("  {}", tree_line(table.tree(i))));
-    }
-
-    let sessions: Vec<_> = task.sessions.iter().chain(&row.new_sessions).collect();
-    if let Some(last) = sessions.iter().map(|s| s.date.as_str()).max() {
-        out.push(format!("  ↺ {} session(s), last {last}", sessions.len()));
-    }
-    out.push(String::new());
-}
-
-fn print_ticket(out: &mut Vec<String>, table: &Table, key: &str, mrs: &[usize], indent: &str) {
-    let line = match table.tickets.get(key) {
-        Some(t) => format!(
-            "{indent}{}  {}  {}",
-            hyperlink(&t.url, key),
-            t.status,
-            truncate(&t.summary, SUMMARY_WIDTH)
-        ),
-        None => format!("{indent}{key}"),
-    };
-    out.push(line);
-    if !mrs.is_empty() {
-        let links: Vec<String> = mrs.iter().map(|&i| mr_link(table, i)).collect();
-        out.push(format!("{indent}    {}", links.join("  ")));
-    }
-}
-
-fn mr_link(table: &Table, i: usize) -> String {
-    let mr = &table.mr(i).mr;
-    hyperlink(mr.web_url(), &format!("!{} {}", mr.iid(), mr.state()))
-}
-
-fn tree_line(tree: &Tree) -> String {
-    let local = match (tree.changes, tree.unpushed) {
-        (Some(0), Some(0) | None) => "clean".to_string(),
-        (Some(c), Some(0) | None) => format!("{c} changed"),
-        (Some(0), Some(u)) => format!("{u} unpushed"),
-        (Some(c), Some(u)) => format!("{c} changed, {u} unpushed"),
-        (None, _) => "git status failed".to_string(),
-    };
-    let mut line = format!(
-        "⌂ {}  {}  {local}",
-        tree.wt.name(),
-        tree.wt.branch.as_deref().unwrap_or("(detached)")
-    );
-    if !tree.agents.is_empty() {
-        line.push_str(&format!("  ◉ {}", tree.agents.join(", ")));
-    }
-    if tree.finished {
-        line.push_str("  → wt done");
-    }
-    line
 }
 
 fn truncate(text: &str, width: usize) -> String {

@@ -119,10 +119,11 @@ impl Cache {
             .ok()?
             .as_secs();
         let key = file.to_string_lossy().to_string();
-        if let Some(entry) = self.entries.get(&key) {
-            if entry.len == len && entry.mtime == mtime {
-                return Some(entry.session.clone());
-            }
+        if let Some(entry) = self.entries.get(&key)
+            && entry.len == len
+            && entry.mtime == mtime
+        {
+            return Some(entry.session.clone());
         }
         let session = parse(file)?;
         self.entries.insert(

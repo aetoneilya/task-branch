@@ -1,6 +1,21 @@
-use crate::client::git::GitError;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum GitError {
+    #[error("failed to execute git command: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("git command exited with status {0}")]
+    NonZeroExit(String),
+
+    #[error("repo path not utf8")]
+    RepoPathNotUtf8(),
+
+    #[error("failed to obtain current branch")]
+    CurrentBranchNotFound(),
+}
 
 pub(crate) type Result<T> = std::result::Result<T, GitError>;
 
@@ -78,6 +93,14 @@ pub fn linked_worktrees(repo: &Path) -> Result<Vec<Worktree>> {
     Ok(worktrees)
 }
 
+pub fn current_branch(path: &Path) -> Result<String> {
+    let branch = git_output(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch.is_empty() {
+        return Err(GitError::CurrentBranchNotFound());
+    }
+    Ok(branch)
+}
+
 pub fn changed_files(path: &Path) -> Result<usize> {
     let output = git_output(path, &["status", "--porcelain"])?;
     Ok(output.lines().filter(|l| !l.is_empty()).count())
@@ -146,7 +169,6 @@ pub fn worktree_dir(main: &Path, name: &str) -> PathBuf {
 /// existing local or remote branch is checked out, otherwise the branch is
 /// created from a freshly fetched origin/HEAD.
 pub struct WorktreePlan {
-    pub dir: PathBuf,
     /// The origin branch to fetch first.
     pub fetch: Option<String>,
     /// Arguments of `git worktree add`.
@@ -159,7 +181,6 @@ pub fn plan_worktree(main: &Path, name: &str, branch: &str) -> Result<WorktreePl
     if branch_exists(main, branch) {
         return Ok(WorktreePlan {
             add: vec!["worktree".into(), "add".into(), path, branch.into()],
-            dir,
             fetch: None,
         });
     }
@@ -173,7 +194,6 @@ pub fn plan_worktree(main: &Path, name: &str, branch: &str) -> Result<WorktreePl
         add: ["worktree", "add", "--no-track", "-b", branch, &path, &base]
             .map(String::from)
             .to_vec(),
-        dir,
     })
 }
 
@@ -195,7 +215,9 @@ pub fn add_worktree(main: &Path, plan: &WorktreePlan, progress: bool) -> Result<
         .stdout(std::process::Stdio::null())
         .status()?;
     if !status.success() {
-        return Err(GitError::NonZeroExit("(git worktree add) failed".to_string()));
+        return Err(GitError::NonZeroExit(
+            "(git worktree add) failed".to_string(),
+        ));
     }
     Ok(())
 }

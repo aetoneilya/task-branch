@@ -19,7 +19,7 @@ pub struct GitLabConfig {
 pub struct WorkflowConfig {
     /// Prepended to new task branches, e.g. "i.udalov/".
     pub branch_prefix: String,
-    /// Model for `jg review`; the claude default when empty.
+    /// Model for `wt review`; the claude default when empty.
     pub review_model: Option<String>,
     /// macOS app the TUI's `i` opens a worktree in.
     pub ide: String,
@@ -87,18 +87,12 @@ pub fn load_config() -> Result<Config, ConfigError> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .or_else(|| dirs::config_dir())
+        .or_else(dirs::config_dir)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // jg's config is read until ~/.config/worktable exists
     let config_path = std::env::var_os("WORKTABLE_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| base.join("worktable").join("config.toml"));
-    let config_path = if config_path.exists() {
-        config_path
-    } else {
-        base.join("jg").join("config.toml")
-    };
 
     let contents = fs::read_to_string(config_path)?;
     let config: Config = toml::from_str(&contents)?;

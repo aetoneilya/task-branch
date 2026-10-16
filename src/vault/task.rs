@@ -44,6 +44,37 @@ impl SessionRef {
     }
 }
 
+/// The `state:` a task note carries, derived from its tickets, MRs and
+/// worktrees; a closed task has `done: true` instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskState {
+    Active,
+    Review,
+    Idea,
+    Finished,
+}
+
+impl TaskState {
+    pub fn parse(text: &str) -> Option<TaskState> {
+        match text {
+            "active" => Some(TaskState::Active),
+            "review" => Some(TaskState::Review),
+            "idea" => Some(TaskState::Idea),
+            "finished" => Some(TaskState::Finished),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskState::Active => "active",
+            TaskState::Review => "review",
+            TaskState::Idea => "idea",
+            TaskState::Finished => "finished",
+        }
+    }
+}
+
 /// A task note: shared context for one piece of work and the tickets it covers.
 #[derive(Debug)]
 pub struct Task {
@@ -52,7 +83,7 @@ pub struct Task {
     pub tickets: Vec<String>,
     pub tags: Vec<String>,
     pub done: bool,
-    pub state: Option<String>,
+    pub state: Option<TaskState>,
     pub sessions: Vec<SessionRef>,
     /// When the note was created, RFC 3339; set by `load_tasks`.
     pub created: Option<String>,
@@ -69,7 +100,7 @@ impl Task {
                 .collect(),
             tags: note.strings("tags"),
             done: note.flag("done"),
-            state: note.string("state"),
+            state: note.string("state").as_deref().and_then(TaskState::parse),
             sessions: note
                 .strings("sessions")
                 .iter()
@@ -142,8 +173,18 @@ fn git_added(vault: &VaultConfig) -> HashMap<PathBuf, String> {
         "--format=@%aI".to_string(),
         "--".to_string(),
     ];
-    args.extend(vault.task_dirs.iter().map(|d| d.to_string_lossy().to_string()));
-    let Ok(output) = Command::new("git").arg("-C").arg(&vault.path).args(&args).output() else {
+    args.extend(
+        vault
+            .task_dirs
+            .iter()
+            .map(|d| d.to_string_lossy().to_string()),
+    );
+    let Ok(output) = Command::new("git")
+        .arg("-C")
+        .arg(&vault.path)
+        .args(&args)
+        .output()
+    else {
         return HashMap::new();
     };
     let mut added = HashMap::new();

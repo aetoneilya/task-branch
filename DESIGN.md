@@ -295,6 +295,7 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 | `⏎` | agent / worktree | focus the agent; a worktree without one: `wt select <task> --tree <name>` (resume or fresh claude) |
 | `⏎` | task, ticket | `wt select` |
 | `b` | ticket, MR, worktree | open in the browser |
+| `i` | worktree, or a task/ticket with one worktree | open it in the IDE (`[workflow] ide`, default "IntelliJ IDEA", via `open -a`) |
 | `o` / `e` | anything under a task | note in Obsidian / in `$EDITOR` |
 | `⏎` | ticket nothing is done on | asks y/n, then `wt start KEY` |
 | `s` | ticket / task | `wt start KEY` / asks a key for `wt add` |

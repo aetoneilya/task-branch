@@ -21,6 +21,8 @@ pub struct WorkflowConfig {
     pub branch_prefix: String,
     /// Model for `jg review`; the claude default when empty.
     pub review_model: Option<String>,
+    /// macOS app the TUI's `i` opens a worktree in.
+    pub ide: String,
 }
 
 impl Default for WorkflowConfig {
@@ -28,6 +30,7 @@ impl Default for WorkflowConfig {
         WorkflowConfig {
             branch_prefix: String::new(),
             review_model: None,
+            ide: "IntelliJ IDEA".to_string(),
         }
     }
 }

@@ -402,6 +402,7 @@ impl App {
             KeyCode::Char('p') => self.preview = Some(!self.preview_shown),
             KeyCode::Enter => self.go(terminal),
             KeyCode::Char('b') => self.open_in_browser(),
+            KeyCode::Char('i') => self.open_in_ide(),
             KeyCode::Char('o') => self.open_note_in_obsidian(),
             KeyCode::Char('e') => self.edit_note(terminal),
             KeyCode::Char('s') => self.start(terminal),
@@ -639,6 +640,41 @@ impl App {
         }
     }
 
+    /// The worktree to open in the IDE: the selected one, or the only live one
+    /// of the selected task or ticket.
+    fn ide_tree(&self) -> Option<usize> {
+        if let Some(t) = self.tree() {
+            return Some(t);
+        }
+        let trees = match &self.current()?.root {
+            Kind::Task(i) => &self.table.tasks[*i].trees,
+            Kind::Loose(i) => &self.table.loose[*i].trees,
+            _ => return None,
+        };
+        let live: Vec<usize> = trees.iter().copied().filter(|&t| !self.table.tree(t).finished).collect();
+        match live.as_slice() {
+            [t] => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// `i`: the worktree in the IDE; an already open project just comes forward.
+    fn open_in_ide(&mut self) {
+        let Some(t) = self.ide_tree() else {
+            self.say("i: select a worktree");
+            return;
+        };
+        let tree = self.table.tree(t);
+        let ide = &self.config.workflow.ide;
+        match Command::new("open").arg("-a").arg(ide).arg(&tree.wt.path).status() {
+            Ok(s) if s.success() => {
+                self.say(format!("{} → {ide}", tree.wt.name()));
+                self.quit |= self.popup;
+            }
+            _ => self.say(format!("! could not open {} in {ide}", tree.wt.name())),
+        }
+    }
+
     fn open_note_in_obsidian(&mut self) {
         match self.note() {
             Some(path) => open(&format!(
@@ -850,6 +886,9 @@ impl App {
                     keys.push(("d", "done".into()));
                 }
             }
+            if self.ide_tree().is_some() {
+                keys.push(("i", "idea".into()));
+            }
             if under_task {
                 keys.push(("N", "note line".into()));
                 keys.push(("o", "obsidian".into()));
@@ -934,6 +973,7 @@ impl App {
             "↑↓ j k     move             ← h  fold / to parent        → l  unfold        space  fold",
             "⏎          agent: focus; worktree: its agent or claude --resume; task: wt select",
             "b          ticket / MR in the browser   o  note in Obsidian       e  note in $EDITOR",
+            "i          worktree in IntelliJ IDEA ([workflow] ide); on a task: its only worktree",
             "s          ticket: wt start KEY; task: add a ticket (wt add)",
             "n          new task (wt start)          c  pick a session (wt select --session)",
             "a          ticket without a task: attach it to a task (wt attach)",

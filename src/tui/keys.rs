@@ -10,6 +10,10 @@ use std::process::Command;
 
 impl App {
     pub(super) fn on_key(&mut self, key: KeyEvent, terminal: &mut DefaultTerminal) {
+        if self.dialog.is_some() {
+            self.on_dialog_key(key);
+            return;
+        }
         if self.prompt.is_some() {
             self.on_prompt_key(key, terminal);
             return;
@@ -93,15 +97,9 @@ impl App {
                 }
             }
             KeyCode::Char('d') => match self.current().map(|r| r.kind.clone()) {
-                Some(Kind::Task(i)) => {
-                    let task = self.table.tasks[i].task.name.clone();
-                    self.run_wt(terminal, &["done", &task]);
-                }
+                Some(Kind::Task(i)) => self.close_task(self.table.tasks[i].task.name.clone()),
                 _ => match self.tree() {
-                    Some(t) => {
-                        let name = self.table.tree(t).wt.name();
-                        self.run_wt(terminal, &["done", &name]);
-                    }
+                    Some(t) => self.remove_tree(t),
                     None => self.say("d works on a task or a worktree"),
                 },
             },

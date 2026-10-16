@@ -1,6 +1,6 @@
 mod progress;
 mod table;
-mod work;
+pub(crate) mod work;
 
 use crate::config::{Config, load_config};
 use crate::vault::task::Task;

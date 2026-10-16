@@ -2,7 +2,7 @@
 
 mod brief;
 mod common;
-mod done;
+pub(crate) mod done;
 mod launch;
 mod review;
 mod select;

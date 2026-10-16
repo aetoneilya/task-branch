@@ -1,9 +1,11 @@
 //! `wt` without a command: the task tree on the left, details of the selection on
 //! the right. The offline table (worktrees, agents, notes) renders at once; Jira
 //! and GitLab fill in from a background refresh, repeated every minute.
-//! Actions run the same `wt` commands; interactive ones get the terminal for a while.
+//! Closing work checks, asks and reports in a dialog; other actions run the same
+//! `wt` commands, and interactive ones get the terminal for a while.
 
 mod details;
+mod dialog;
 mod draw;
 mod keys;
 mod rows;
@@ -13,6 +15,7 @@ use crate::config::Config;
 use crate::table::{self, Table};
 use crate::vault::{self, note::NoteError};
 use details::Detail;
+use dialog::{Action, Dialog};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::widgets::ListState;
@@ -55,6 +58,11 @@ enum Update {
     Detail(Detail, String),
     Message(String),
     Agents(Vec<herdr::Agent>),
+    /// A dialog's action checked, or why it can't be.
+    Plan(Result<Action, String>),
+    /// A line of a running action's report.
+    Said(String),
+    Finished(Result<(), String>),
 }
 
 struct App {
@@ -68,6 +76,7 @@ struct App {
     all: bool,
     filter: String,
     prompt: Option<(Prompt, String)>,
+    dialog: Option<Dialog>,
     /// Shown in the footer for a few seconds instead of the key hints.
     message: Option<(String, Instant)>,
     help: bool,
@@ -109,6 +118,7 @@ impl App {
             all: false,
             filter: String::new(),
             prompt: None,
+            dialog: None,
             message: None,
             help: false,
             preview: None,
@@ -235,6 +245,9 @@ impl App {
                 self.details.insert(detail, text);
             }
             Update::Message(text) => self.say(text),
+            Update::Plan(plan) => self.on_plan(plan),
+            Update::Said(line) => self.on_said(line),
+            Update::Finished(result) => self.on_finished(result),
             Update::Agents(agents) => {
                 self.agents_polling = false;
                 self.agents_polled = Instant::now();

@@ -220,8 +220,8 @@ pub(super) fn live_agents() -> Vec<herdr::Agent> {
 }
 
 /// Closes what herdr shows of a removed worktree: its own workspace, otherwise
-/// the tabs whose agents work in it.
-pub(super) fn close_herdr_views(path: &Path) {
+/// the tabs whose agents work in it. Failures go to `say`.
+pub(super) fn close_herdr_views(path: &Path, say: &mut dyn FnMut(String)) {
     if !herdr::available() {
         return;
     }
@@ -239,7 +239,7 @@ pub(super) fn close_herdr_views(path: &Path) {
     if !own.is_empty() {
         for ws in own {
             if let Err(err) = herdr::close_workspace(&ws.workspace_id) {
-                eprintln!("can't close workspace {}: {err}", ws.label);
+                say(format!("can't close workspace {}: {err}", ws.label));
             }
         }
         return;
@@ -254,7 +254,7 @@ pub(super) fn close_herdr_views(path: &Path) {
     tabs.dedup();
     for tab in tabs {
         if let Err(err) = herdr::close_tab(&tab) {
-            eprintln!("can't close tab {tab}: {err}");
+            say(format!("can't close tab {tab}: {err}"));
         }
     }
 }

@@ -98,6 +98,7 @@ impl App {
         if self.help {
             self.draw_help(frame);
         }
+        self.draw_dialog(frame);
     }
 
     /// Keys that do something on the selected row, then the ones that always do.

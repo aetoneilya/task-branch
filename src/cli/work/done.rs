@@ -23,22 +23,71 @@ pub(in crate::cli) fn cli_done(config: &Config, args: DoneArgs) -> Result<(), St
         && let Some(i) = find_task(&tasks, name, false)?
         && !tasks[i].done
     {
-        return done_task(config, tasks, name, args.force, args.yes);
+        let plan = plan_task(config, tasks, name, args.force)?;
+        if !plan.blockers.is_empty() {
+            return Err(not_finished(plan.name(), &plan.blockers));
+        }
+        println!("Closing task \"{}\":", plan.name());
+        for step in plan.steps() {
+            println!("  {step}");
+        }
+        if !args.yes && !confirm("Go?")? {
+            return Ok(());
+        }
+        return finish_task(config, plan, args.force, &mut print);
     }
     done_trees(config, args)
 }
 
-/// `wt done <task>`: the task is over. Its worktrees go (each must be finished:
-/// clean, MR merged or closed, nothing unpushed), my open tickets of it are
-/// closed in Jira, and the note gets `done: true` with the final MRs and
-/// branches — after that worktable leaves it alone.
-fn done_task(
+fn print(line: String) {
+    println!("{line}");
+}
+
+/// What `wt done <task>` would do, checked against fresh Jira and GitLab: the
+/// task's worktrees go (each must be finished: clean, MR merged or closed,
+/// nothing unpushed), my open tickets of it are closed in Jira, and the note
+/// gets `done: true` with the final MRs and branches — after that worktable
+/// leaves it alone.
+pub(crate) struct TaskPlan {
+    table: Table,
+    row: usize,
+    /// What still holds the task open; none with force.
+    pub(crate) blockers: Vec<String>,
+    to_close: Vec<String>,
+    left_open: Vec<String>,
+}
+
+impl TaskPlan {
+    pub(crate) fn name(&self) -> &str {
+        &self.table.tasks[self.row].task.name
+    }
+
+    /// One line per thing that will happen.
+    pub(crate) fn steps(&self) -> Vec<String> {
+        let row = &self.table.tasks[self.row];
+        let mut steps: Vec<String> = row
+            .trees
+            .iter()
+            .map(|&t| format!("remove worktree {}", self.table.tree(t).wt.name()))
+            .collect();
+        steps.extend(self.to_close.iter().map(|k| format!("close {k} in Jira")));
+        steps.extend(
+            self.left_open
+                .iter()
+                .map(|k| format!("{k} is not assigned to me — left open")),
+        );
+        steps.push("mark the note done".to_string());
+        steps
+    }
+}
+
+/// `tasks` from the vault, `name` an open one of them by name or ticket.
+pub(crate) fn plan_task(
     config: &Config,
     tasks: Vec<Task>,
     name: &str,
     force: bool,
-    yes: bool,
-) -> Result<(), String> {
+) -> Result<TaskPlan, String> {
     let table = table::build(config, tasks, true);
     if let Some(warning) = [&table.jira, &table.gitlab]
         .into_iter()
@@ -47,73 +96,87 @@ fn done_task(
         return Err(format!("{warning} — not closing a task on partial data"));
     }
     let row = find_task(table.tasks.iter().map(|r| &r.task), name, false)?
-        .map(|i| &table.tasks[i])
-        .filter(|r| !r.task.done)
+        .filter(|&i| !table.tasks[i].task.done)
         .ok_or_else(|| format!("no open task \"{name}\""))?;
+    let task = &table.tasks[row];
 
+    let mut blockers = Vec::new();
     if !force {
-        // what still holds the task open
-        let mut blockers = Vec::new();
-        for &t in &row.trees {
+        for &t in &task.trees {
             blockers.extend(tree_blockers(&table, table.tree(t))?);
         }
-        let held: Vec<usize> = row.trees.iter().filter_map(|&t| table.tree(t).mr).collect();
-        for &m in row.mrs.iter().filter(|m| !held.contains(m)) {
+        let held: Vec<usize> = task
+            .trees
+            .iter()
+            .filter_map(|&t| table.tree(t).mr)
+            .collect();
+        for &m in task.mrs.iter().filter(|m| !held.contains(m)) {
             if table.mr(m).opened() {
                 blockers.push(format!("MR !{} is open", table.mr(m).mr.iid()));
             }
         }
-        if !blockers.is_empty() {
-            return Err(not_finished(&row.task.name, &blockers));
-        }
     }
 
-    let keys: Vec<&String> = row.task.tickets.iter().chain(&row.found_tickets).collect();
-    let to_close: Vec<&String> = keys
-        .iter()
-        .copied()
-        .filter(|k| table.tickets.get(*k).is_some_and(|t| t.mine && !t.closed()))
-        .collect();
-    let left_open: Vec<&String> = keys
-        .iter()
-        .copied()
-        .filter(|k| {
-            table
-                .tickets
-                .get(*k)
-                .is_some_and(|t| !t.mine && !t.closed())
-        })
-        .collect();
+    let open_tickets = |mine: bool| -> Vec<String> {
+        task.task
+            .tickets
+            .iter()
+            .chain(&task.found_tickets)
+            .filter(|k| {
+                table
+                    .tickets
+                    .get(*k)
+                    .is_some_and(|t| t.mine == mine && !t.closed())
+            })
+            .cloned()
+            .collect()
+    };
+    let (to_close, left_open) = (open_tickets(true), open_tickets(false));
+    Ok(TaskPlan {
+        table,
+        row,
+        blockers,
+        to_close,
+        left_open,
+    })
+}
 
-    println!("Closing task \"{}\":", row.task.name);
-    for &t in &row.trees {
-        println!("  remove worktree {}", table.tree(t).wt.name());
-    }
-    for key in &to_close {
-        println!("  close {key} in Jira");
-    }
-    for key in &left_open {
-        println!("  {key} is not assigned to me — left open");
-    }
-    println!("  mark the note done");
-    if !yes && !confirm("Go?")? {
-        return Ok(());
-    }
+/// Does what the plan says, reporting each step to `say`.
+pub(crate) fn finish_task(
+    config: &Config,
+    plan: TaskPlan,
+    force: bool,
+    say: &mut dyn FnMut(String),
+) -> Result<(), String> {
+    let TaskPlan {
+        table,
+        row,
+        to_close,
+        ..
+    } = plan;
+    let row = &table.tasks[row];
+    // before anything goes: without Jira the task would end half-closed
+    let jira = if to_close.is_empty() {
+        None
+    } else {
+        Some(JiraClient::from_env(&config.jira.host)?)
+    };
 
     let mut problems = Vec::new();
     for &t in &row.trees {
         let tree = table.tree(t);
-        match remove_tree(tree, mr_of(&table, tree), force) {
+        match remove_tree(tree, mr_of(&table, tree), force, say) {
             Ok(kept) => problems.extend(kept),
             Err(e) => problems.push(format!("{}: {e}", tree.wt.name())),
         }
     }
 
-    let jira = JiraClient::from_env(&config.jira.host)?;
-    for key in &to_close {
-        match close_in_jira(&jira, key) {
-            Ok(status) => println!("{key} → {status}"),
-            Err(e) => problems.push(format!("{key}: {e}")),
+    if let Some(jira) = &jira {
+        for key in &to_close {
+            match close_in_jira(jira, key) {
+                Ok(status) => say(format!("{key} → {status}")),
+                Err(e) => problems.push(format!("{key}: {e}")),
+            }
         }
     }
 
@@ -150,11 +213,11 @@ fn done_task(
         }
         note.save().map_err(err)?;
     }
-    println!("\"{}\" is done", row.task.name);
+    say(format!("\"{}\" is done", row.task.name));
 
     // last: this may close the tab wt itself runs in
     for &t in &row.trees {
-        close_herdr_views(&table.tree(t).wt.path);
+        close_herdr_views(&table.tree(t).wt.path, &mut |e| problems.push(e));
     }
     if problems.is_empty() {
         Ok(())
@@ -166,21 +229,21 @@ fn done_task(
 /// `wt done [<worktree>]` and `wt done --merged`: worktrees go one by one, each
 /// once it is finished.
 fn done_trees(config: &Config, args: DoneArgs) -> Result<(), String> {
-    let table = tree_table(config, true)?;
-    // GitLab did not answer: the last known MR states will do, but with none at
-    // all an open MR looks like no MR
-    if let Some(warning) = &table.gitlab.warning {
-        if !args.force && table.gitlab.fresh == Fresh::Missing {
-            return Err(format!(
-                "{warning} — not removing worktrees on partial data, or pass --force"
-            ));
-        }
+    let (table, warning) = trees_for_done(config, args.force)?;
+    if let Some(warning) = warning {
         eprintln!("{warning}");
     }
 
     if !args.merged {
-        let tree = table.tree(resolve_tree(&table, args.name)?);
-        return done_tree(&table, tree, args.force, args.yes);
+        let tree = resolve_tree(&table, args.name)?;
+        let plan = TreePlan::new(table, tree, args.force)?;
+        if !plan.blockers.is_empty() {
+            return Err(not_finished(&plan.name(), &plan.blockers));
+        }
+        if !args.yes && !confirm(&format!("{}?", plan.step()))? {
+            return Ok(());
+        }
+        return finish_tree(plan, args.force, &mut print);
     }
 
     // sweep: clean worktrees whose merge request is merged or closed
@@ -196,38 +259,97 @@ fn done_trees(config: &Config, args: DoneArgs) -> Result<(), String> {
     if !args.yes && !confirm("Remove all of them?")? {
         return Ok(());
     }
+    let mut removed = Vec::new();
     for tree in finished {
-        if let Err(err) = done_tree(&table, tree, false, true) {
-            eprintln!("{}: {err}", tree.wt.name());
+        let name = tree.wt.name();
+        let result = tree_blockers(&table, tree).and_then(|blockers| {
+            if blockers.is_empty() {
+                remove_tree(tree, mr_of(&table, tree), false, &mut print)
+            } else {
+                Err(not_finished(&name, &blockers))
+            }
+        });
+        match result {
+            Ok(kept) => {
+                kept.into_iter().for_each(|k| eprintln!("{k}"));
+                removed.push(tree);
+            }
+            Err(e) => eprintln!("{name}: {e}"),
         }
+    }
+    // last: this may close the pane wt itself runs in
+    for tree in removed {
+        close_herdr_views(&tree.wt.path, &mut |e| eprintln!("{e}"));
     }
     Ok(())
 }
 
-/// One worktree, with its branch and herdr tabs, once nothing holds it.
-fn done_tree(table: &Table, tree: &Tree, force: bool, yes: bool) -> Result<(), String> {
-    let name = tree.wt.name();
-    if !force {
-        let blockers = tree_blockers(table, tree)?;
-        if !blockers.is_empty() {
-            return Err(not_finished(&name, &blockers));
-        }
-    }
-
-    let branch = tree.wt.branch.as_deref().unwrap_or("(detached)");
-    if !yes
-        && !confirm(&format!(
-            "Remove {name} (branch {branch}) and its herdr tabs?"
-        ))?
+/// Worktrees with their MRs, and what to warn about. GitLab did not answer: the
+/// last known MR states will do, but with none at all an open MR looks like no
+/// MR, so that takes force.
+pub(crate) fn trees_for_done(
+    config: &Config,
+    force: bool,
+) -> Result<(Table, Option<String>), String> {
+    let table = tree_table(config, true)?;
+    let warning = table.gitlab.warning.clone();
+    if let Some(warning) = &warning
+        && !force
+        && table.gitlab.fresh == Fresh::Missing
     {
-        return Ok(());
+        return Err(format!(
+            "{warning} — not removing worktrees on partial data, or pass --force"
+        ));
     }
-    if let Some(kept) = remove_tree(tree, mr_of(table, tree), force)? {
-        eprintln!("{kept}");
+    Ok((table, warning))
+}
+
+/// What `wt done <worktree>` would do: the worktree goes, with its branch and
+/// herdr tabs, once nothing holds it.
+pub(crate) struct TreePlan {
+    table: Table,
+    tree: usize,
+    /// What still holds the worktree; none with force.
+    pub(crate) blockers: Vec<String>,
+}
+
+impl TreePlan {
+    /// `tree` indexes `table.trees`.
+    pub(crate) fn new(table: Table, tree: usize, force: bool) -> Result<TreePlan, String> {
+        let blockers = if force {
+            Vec::new()
+        } else {
+            tree_blockers(&table, table.tree(tree))?
+        };
+        Ok(TreePlan {
+            table,
+            tree,
+            blockers,
+        })
     }
 
+    pub(crate) fn name(&self) -> String {
+        self.table.tree(self.tree).wt.name()
+    }
+
+    pub(crate) fn step(&self) -> String {
+        let wt = &self.table.tree(self.tree).wt;
+        let branch = wt.branch.as_deref().unwrap_or("(detached)");
+        format!("Remove {} (branch {branch}) and its herdr tabs", wt.name())
+    }
+}
+
+pub(crate) fn finish_tree(
+    plan: TreePlan,
+    force: bool,
+    say: &mut dyn FnMut(String),
+) -> Result<(), String> {
+    let tree = plan.table.tree(plan.tree);
+    if let Some(kept) = remove_tree(tree, mr_of(&plan.table, tree), force, say)? {
+        say(kept);
+    }
     // last: this may close the pane wt itself runs in
-    close_herdr_views(&tree.wt.path);
+    close_herdr_views(&tree.wt.path, say);
     Ok(())
 }
 
@@ -275,11 +397,12 @@ fn remove_tree(
     tree: &Tree,
     mr: Option<&MergeRequest>,
     force: bool,
+    say: &mut dyn FnMut(String),
 ) -> Result<Option<String>, String> {
     let name = tree.wt.name();
     let main = worktree::main_checkout(&tree.repo).map_err(err)?;
     worktree::remove_worktree(&main, &tree.wt.path, force).map_err(err)?;
-    println!("removed {name}");
+    say(format!("removed {name}"));
     let Some(branch) = &tree.wt.branch else {
         return Ok(None);
     };

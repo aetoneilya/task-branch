@@ -212,7 +212,7 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
     }
 
     let finished_trees = table.trees.iter().filter(|t| t.finished).count();
-    let hidden = table.loose.len() - loose_shown + table.other_mrs.len();
+    let hidden = table.loose.len().saturating_sub(loose_shown) + table.other_mrs.len();
     let mut footer = Vec::new();
     if !finished_tasks.is_empty() {
         footer.push(format!(
@@ -415,6 +415,18 @@ fn truncate(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         return text.to_string();
     }
-    let cut: String = text.chars().take(width - 1).collect();
+    let cut: String = text.chars().take(width.saturating_sub(1)).collect();
     format!("{cut}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncates_to_any_width() {
+        assert_eq!(truncate("abcdef", 4), "abc…");
+        assert_eq!(truncate("abc", 3), "abc");
+        assert_eq!(truncate("abc", 0), "…");
+    }
 }

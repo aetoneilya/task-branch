@@ -2,7 +2,7 @@
 //! to which task, what is left loose, and each task's derived state. No I/O, so
 //! the rules are tested on hand-built inputs.
 
-use super::{Agent, LooseTicket, Mr, Table, TaskRow, Ticket, Tree, branch_finished};
+use super::{Agent, LooseTicket, Mr, Source, Table, TaskRow, Ticket, Tree, branch_finished};
 use crate::client::gitlab::MrState;
 use crate::client::herdr;
 use crate::client::sessions::Session;
@@ -23,8 +23,10 @@ pub struct Inputs {
     pub sessions: HashMap<String, Session>,
     /// `<main checkout>/.claude/worktrees` of every repo.
     pub roots: Vec<PathBuf>,
-    /// Jira and GitLab both answered: task states can be derived.
+    /// Jira and GitLab both answered in full: task states can be derived.
     pub complete: bool,
+    pub jira: Source,
+    pub gitlab: Source,
     pub warnings: Vec<String>,
     pub jira_host: String,
 }
@@ -40,6 +42,8 @@ pub fn assemble(inputs: Inputs) -> Table {
         sessions,
         roots,
         complete,
+        jira,
+        gitlab,
         warnings,
         jira_host,
     } = inputs;
@@ -91,6 +95,17 @@ pub fn assemble(inputs: Inputs) -> Table {
         .into_iter()
         .map(|task| task_row(task, &trees, &mrs, &workspaces, &owned))
         .collect();
+    // a key found on the work of several tasks is none of theirs to write down:
+    // which one it is for is mine to say
+    let mut finders: HashMap<String, usize> = HashMap::new();
+    for key in rows.iter().flat_map(|r| &r.found_tickets) {
+        *finders.entry(key.clone()).or_default() += 1;
+    }
+    for row in &mut rows {
+        (row.shared_tickets, row.found_tickets) = std::mem::take(&mut row.found_tickets)
+            .into_iter()
+            .partition(|key| finders[key] > 1);
+    }
 
     for row in rows.iter_mut().filter(|r| !r.task.done) {
         row.new_sessions = discover_sessions(row, &trees, &roots, &sessions);
@@ -104,7 +119,7 @@ pub fn assemble(inputs: Inputs) -> Table {
     let free_trees: Vec<usize> = (0..trees.len()).filter(|i| !in_tasks.contains(i)).collect();
 
     // a ticket on a task's worktree or MR is that task's, listed in the note or not
-    owned.extend(rows.iter().flat_map(|r| r.found_tickets.iter().cloned()));
+    owned.extend(rows.iter().flat_map(|r| r.tickets().cloned()));
     let mut loose_keys: Vec<String> = Vec::new();
     let mut push_key = |key: &String| {
         if !owned.contains(key) && !loose_keys.contains(key) {
@@ -185,6 +200,8 @@ pub fn assemble(inputs: Inputs) -> Table {
         mrs,
         trees,
         sessions,
+        jira,
+        gitlab,
         warnings,
         jira_host,
     }
@@ -239,6 +256,7 @@ fn task_row(
         trees: row_trees,
         mrs: row_mrs,
         found_tickets,
+        shared_tickets: Vec::new(),
         new_sessions: Vec::new(),
         space,
         state: None,
@@ -463,16 +481,27 @@ mod tests {
 
     #[test]
     fn keys_on_a_task_s_work_are_found_tickets_unless_another_note_lists_them() {
-        let table = table(
+        let mut table = table(
             vec![task("a2i", &["UCP-1"]), task("b", &["UCP-3"])],
             vec![],
             vec![mr(10, "i.udalov/UCP-1-UCP-2", "UCP-3 too", "opened")],
             vec![tree("a", "i.udalov/UCP-1-and-UCP-4")],
         );
         // UCP-3 is b's: the MR is b's too, but a2i does not take the key over
-        assert_eq!(table.task_row("a2i").found_tickets, vec!["UCP-4", "UCP-2"]);
-        assert_eq!(table.task_row("b").found_tickets, vec!["UCP-2"]);
+        assert_eq!(table.task_row("a2i").found_tickets, vec!["UCP-4"]);
+        assert!(table.task_row("b").found_tickets.is_empty());
+        // UCP-2 is on the work of both: shown in both, written into neither
+        assert_eq!(table.task_row("a2i").shared_tickets, vec!["UCP-2"]);
+        assert_eq!(table.task_row("b").shared_tickets, vec!["UCP-2"]);
         assert!(table.loose_keys().is_empty());
+
+        write_back(&mut table);
+        let tickets = |name: &str| {
+            let path = &table.task_row(name).task.note.path;
+            Task::from_note(Note::read(path).unwrap()).tickets
+        };
+        assert_eq!(tickets("a2i"), vec!["UCP-1", "UCP-4"]);
+        assert_eq!(tickets("b"), vec!["UCP-3"]);
     }
 
     #[test]
@@ -618,6 +647,7 @@ mod tests {
             cwds: vec![(format!("{ROOT}/{cwd}"), 1)],
             first_cwd: None,
             last_cwd: None,
+            modified: 0,
         };
         for s in [
             session("s0", "gone"),
@@ -657,6 +687,7 @@ mod tests {
                 cwds: vec![(format!("{ROOT}/a"), 1)],
                 first_cwd: None,
                 last_cwd: None,
+                modified: 0,
             },
         );
         let mut table = assemble(inputs);

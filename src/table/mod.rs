@@ -8,9 +8,10 @@ mod matching;
 pub mod view;
 
 #[cfg(test)]
-mod fixtures;
+pub(crate) mod fixtures;
 
 use crate::client::gitlab::{MergeRequest, MrReview, MrState};
+pub use crate::client::jira::Category;
 use crate::client::jira::JiraIssue;
 use crate::client::worktree::Worktree;
 use crate::client::{herdr, sessions};
@@ -21,30 +22,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::LazyLock;
-
-/// Jira's coarse status, the `statusCategory` key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Category {
-    #[serde(rename = "new")]
-    New,
-    #[serde(rename = "indeterminate")]
-    InProgress,
-    #[serde(rename = "done")]
-    Done,
-    #[serde(rename = "undefined", other)]
-    Unknown,
-}
-
-impl Category {
-    pub fn parse(key: &str) -> Category {
-        match key {
-            "new" => Category::New,
-            "indeterminate" => Category::InProgress,
-            "done" => Category::Done,
-            _ => Category::Unknown,
-        }
-    }
-}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Ticket {
@@ -64,7 +41,7 @@ impl Ticket {
             key: issue.key.clone(),
             summary: issue.fields.summary.clone(),
             status: issue.status().to_string(),
-            category: Category::parse(issue.status_category()),
+            category: issue.status_category(),
             mine,
             created: issue.fields.created.to_rfc3339(),
         }
@@ -204,6 +181,9 @@ pub struct TaskRow {
     /// Ticket keys on the task's worktrees and MRs that no note lists yet:
     /// `write_back` adds them to the task's `tickets`.
     pub found_tickets: Vec<String>,
+    /// Keys no note lists yet that are on other tasks' work too: shown, but
+    /// written into no note.
+    pub shared_tickets: Vec<String>,
     /// Sessions found in the task's worktrees that the note does not list yet.
     pub new_sessions: Vec<SessionRef>,
     /// The task's herdr workspace: the one labelled with the task name.
@@ -228,7 +208,11 @@ impl TaskRow {
 
     /// The note's tickets, then the ones found on its worktrees and MRs.
     pub fn tickets(&self) -> impl Iterator<Item = &String> {
-        self.task.tickets.iter().chain(&self.found_tickets)
+        self.task
+            .tickets
+            .iter()
+            .chain(&self.found_tickets)
+            .chain(&self.shared_tickets)
     }
 }
 
@@ -260,6 +244,26 @@ pub struct LooseTicket {
     pub state: Option<TaskState>,
 }
 
+/// How current the table's data from a remote service is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fresh {
+    /// It answered in this build.
+    Live,
+    /// Not asked, or it did not answer: what it said last time stands in.
+    Cached,
+    /// Not asked, or it did not answer, and nothing is cached either.
+    Missing,
+}
+
+/// What a remote service gave this build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub fresh: Fresh,
+    /// Why it did not answer, as shown in `Table::warnings`; None when it did,
+    /// or was not asked.
+    pub warning: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct Table {
     pub tasks: Vec<TaskRow>,
@@ -273,6 +277,8 @@ pub struct Table {
     pub trees: Vec<Tree>,
     /// Claude sessions of the main checkouts, worktrees and open tasks, by id.
     pub sessions: HashMap<String, sessions::Session>,
+    pub jira: Source,
+    pub gitlab: Source,
     pub warnings: Vec<String>,
     pub jira_host: String,
 }
@@ -280,19 +286,14 @@ pub struct Table {
 /// `online: false` skips Jira and GitLab: worktrees, agents, workspaces and
 /// sessions only, without task states — for commands that must answer fast.
 pub fn build(config: &Config, tasks: Vec<Task>, online: bool) -> Table {
-    let inputs = fetch::fetch(config, tasks, online, None);
+    let inputs = fetch::fetch(config, tasks, online, online);
     crate::trace::time("matching", || matching::assemble(inputs))
 }
 
 /// Offline, but with the tickets and MRs of the last online build: the TUI's
 /// first frame shows them at once while the refresh runs.
 pub fn build_cached(config: &Config, tasks: Vec<Task>) -> Table {
-    matching::assemble(fetch::fetch(
-        config,
-        tasks,
-        false,
-        fetch::RemoteCache::load(),
-    ))
+    matching::assemble(fetch::fetch(config, tasks, false, true))
 }
 
 /// MR merged or closed, and the branch has nothing beyond it: either every commit

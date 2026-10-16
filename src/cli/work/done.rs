@@ -10,7 +10,7 @@ use crate::client::gitlab::{MergeRequest, MrState};
 use crate::client::jira::{JiraClient, Transition};
 use crate::client::worktree;
 use crate::config::Config;
-use crate::table::{self, Table, Tree, branch_finished};
+use crate::table::{self, Fresh, Table, Tree, branch_finished};
 use crate::vault::note::Note;
 use crate::vault::task::Task;
 use serde_yaml::Value;
@@ -40,7 +40,10 @@ fn done_task(
     yes: bool,
 ) -> Result<(), String> {
     let table = table::build(config, tasks, true);
-    if let Some(warning) = table.warnings.first() {
+    if let Some(warning) = [&table.jira, &table.gitlab]
+        .into_iter()
+        .find_map(|source| source.warning.as_ref())
+    {
         return Err(format!("{warning} — not closing a task on partial data"));
     }
     let row = find_task(table.tasks.iter().map(|r| &r.task), name, false)?
@@ -166,8 +169,8 @@ fn done_trees(config: &Config, args: DoneArgs) -> Result<(), String> {
     let table = tree_table(config, true)?;
     // GitLab did not answer: the last known MR states will do, but with none at
     // all an open MR looks like no MR
-    if let Some(warning) = table.warnings.iter().find(|w| w.starts_with("GitLab")) {
-        if !args.force && !warning.ends_with("showing cached") {
+    if let Some(warning) = &table.gitlab.warning {
+        if !args.force && table.gitlab.fresh == Fresh::Missing {
             return Err(format!(
                 "{warning} — not removing worktrees on partial data, or pass --force"
             ));
@@ -229,7 +232,7 @@ fn done_tree(table: &Table, tree: &Tree, force: bool, yes: bool) -> Result<(), S
 }
 
 /// What keeps a worktree from being removed: uncommitted changes, an open MR,
-/// commits that are nowhere but here.
+/// commits that are nowhere but here or may be.
 fn tree_blockers(table: &Table, tree: &Tree) -> Result<Vec<String>, String> {
     let wt = tree.wt.name();
     let changes = match tree.changes {
@@ -240,21 +243,16 @@ fn tree_blockers(table: &Table, tree: &Tree) -> Result<Vec<String>, String> {
     if changes > 0 {
         blockers.push(format!("{wt}: {changes} uncommitted change(s)"));
     }
-    match mr_of(table, tree) {
-        Some(mr) if mr.state() == MrState::Opened => {
+    match (mr_of(table, tree), tree.unpushed) {
+        (Some(mr), _) if mr.state() == MrState::Opened => {
             blockers.push(format!("{wt}: MR !{} is open", mr.iid()))
         }
-        // unknown unpushed commits count as some
-        Some(mr)
-            if tree
-                .unpushed
-                .is_none_or(|n| !branch_finished(mr, n, tree.head.as_deref())) =>
-        {
+        // git could not tell: they may be the only copy, MR or not
+        (_, None) => blockers.push(format!("{wt}: unpushed commits unknown")),
+        (Some(mr), Some(n)) if !branch_finished(mr, n, tree.head.as_deref()) => {
             blockers.push(format!("{wt}: commits after MR !{}", mr.iid()))
         }
-        None if tree.unpushed.unwrap_or(0) > 0 => {
-            blockers.push(format!("{wt}: unpushed commits and no MR"))
-        }
+        (None, Some(n)) if n > 0 => blockers.push(format!("{wt}: unpushed commits and no MR")),
         _ => {}
     }
     Ok(blockers)
@@ -285,15 +283,19 @@ fn remove_tree(
     let Some(branch) = &tree.wt.branch else {
         return Ok(None);
     };
-    // -d compares with the local master, which is usually stale, and refuses
-    // squash-merged branches; nothing is lost when every commit is on origin
-    let merged = mr.is_some_and(|mr| mr.state() == MrState::Merged);
-    let nothing_to_lose = merged || tree.unpushed.unwrap_or(0) == 0;
     Ok(
-        worktree::delete_branch(&main, branch, force || nothing_to_lose)
+        worktree::delete_branch(&main, branch, force || nothing_to_lose(tree, mr))
             .err()
             .map(|e| format!("{name}: branch {branch} kept: {e}")),
     )
+}
+
+/// Whether the branch may go though `git branch -d` refuses it: -d compares with
+/// the local master, which is usually stale, and refuses squash-merged branches.
+/// Nothing is lost when the MR is merged or every commit is on origin — not
+/// when git could not count them.
+fn nothing_to_lose(tree: &Tree, mr: Option<&MergeRequest>) -> bool {
+    mr.is_some_and(|mr| mr.state() == MrState::Merged) || tree.unpushed == Some(0)
 }
 
 /// Moves the ticket to a "closed"-like status of its workflow.
@@ -313,7 +315,7 @@ fn closing_transition(transitions: &[Transition]) -> Option<&Transition> {
     let name = |t: &Transition| format!("{} {}", t.name, t.to.name).to_lowercase();
     let usable: Vec<_> = transitions
         .iter()
-        .filter(|t| table::Category::parse(&t.to.status_category.key) == table::Category::Done)
+        .filter(|t| t.to.status_category.key == table::Category::Done)
         .filter(|t| !refused.iter().any(|r| name(t).contains(r)))
         .collect();
     usable
@@ -364,8 +366,41 @@ pub(in crate::cli) fn cli_attach(
 
 #[cfg(test)]
 mod tests {
-    use super::closing_transition;
+    use super::{closing_transition, nothing_to_lose, tree_blockers};
     use crate::client::jira::Transition;
+    use crate::table::fixtures::{mr, table, tree};
+
+    #[test]
+    fn unknown_unpushed_commits_hold_a_worktree() {
+        let mut unknown = tree("unknown", "i.udalov/UCP-1-a");
+        unknown.unpushed = None;
+        let mut ahead = tree("ahead", "i.udalov/UCP-2-b");
+        ahead.unpushed = Some(2);
+        let table = table(
+            vec![],
+            vec![],
+            vec![mr(1, "i.udalov/UCP-1-a", "x", "closed")],
+            vec![unknown, ahead, tree("pushed", "i.udalov/UCP-3-c")],
+        );
+        let blockers =
+            |name: &str| tree_blockers(&table, table.tree(table.tree_index(name))).unwrap();
+        // with an MR or without one
+        assert_eq!(
+            blockers("unknown"),
+            vec!["unknown: unpushed commits unknown"]
+        );
+        assert_eq!(blockers("ahead"), vec!["ahead: unpushed commits and no MR"]);
+        assert!(blockers("pushed").is_empty());
+
+        let unknown = table.tree(table.tree_index("unknown"));
+        assert!(!nothing_to_lose(unknown, None));
+        let closed = &table.mr(table.mr_index(1)).mr;
+        assert!(!nothing_to_lose(unknown, Some(closed)));
+        assert!(nothing_to_lose(
+            table.tree(table.tree_index("pushed")),
+            None
+        ));
+    }
 
     #[test]
     fn closes_rather_than_cancels() {

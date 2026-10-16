@@ -33,6 +33,11 @@ impl JiraError {
     pub fn bad_request(&self) -> bool {
         matches!(self, JiraError::RequestResultError(status, _) if *status == StatusCode::BAD_REQUEST)
     }
+
+    /// No such issue, or not one I may see (404).
+    pub fn not_found(&self) -> bool {
+        matches!(self, JiraError::RequestResultError(status, _) if *status == StatusCode::NOT_FOUND)
+    }
 }
 
 /// How much of an error response goes into the message: Jira answers with whole
@@ -154,13 +159,12 @@ pub struct JiraIssue {
 }
 
 impl JiraIssue {
-    pub fn status_category(&self) -> &str {
+    pub fn status_category(&self) -> Category {
         self.fields
             .status
             .as_ref()
             .and_then(|s| s.status_category.as_ref())
-            .map(|c| c.key.as_str())
-            .unwrap_or("")
+            .map_or(Category::Unknown, |c| c.key)
     }
 
     pub fn status(&self) -> &str {
@@ -187,8 +191,20 @@ pub struct Status {
     pub status_category: Option<StatusCategory>,
 }
 
-/// Jira's coarse status: "new", "indeterminate" (in progress) or "done".
 #[derive(Debug, Deserialize)]
 pub struct StatusCategory {
-    pub key: String,
+    pub key: Category,
+}
+
+/// Jira's coarse status, the `statusCategory` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub enum Category {
+    #[serde(rename = "new")]
+    New,
+    #[serde(rename = "indeterminate")]
+    InProgress,
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "undefined", other)]
+    Unknown,
 }

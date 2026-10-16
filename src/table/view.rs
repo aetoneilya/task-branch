@@ -95,12 +95,12 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
             .filter_map(|k| table.tickets.get(k))
             .map(|t| t.summary.as_str())
             .collect();
+        let keys: Vec<&str> = row.tickets().map(String::as_str).collect();
         let text = format!(
-            "{} #{} {} {} {} {}",
+            "{} #{} {} {} {}",
             row.task.name,
             row.task.tags.join(" #"),
-            row.task.tickets.join(" "),
-            row.found_tickets.join(" "),
+            keys.join(" "),
             summaries.join(" "),
             branches(table, &row.trees)
         );

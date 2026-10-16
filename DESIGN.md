@@ -86,7 +86,7 @@ done: false
 state: active
 sessions: ["a9c0419b-e9d1-… a2i-config 2026-10-08", "6db598b3-… a2i-config-review 2026-10-09"]
 # written once by `wt done`, frozen afterwards
-mrs: ["!16428 merged", "!16266 merged", "!16170 merged"]
+mrs: ["https://gitlab.corp.mail.ru/…/-/merge_requests/16428", "https://gitlab.corp.mail.ru/…/-/merge_requests/16266"]
 branches: [i.udalov/UCP-61083-a2i-config-folder, i.udalov/UCP-61083-selectors-3-level]
 closed: 2026-11-02
 ---
@@ -108,8 +108,11 @@ closed: 2026-11-02
 - A file is rewritten only when a managed value changed, via temp + rename,
   skipped if its mtime moved during the sync. One lock file per vault serialises
   sync, TUI refresh and `wt note`.
-- If Jira or GitLab is unreachable, sync keeps the previous `state` instead of
-  recomputing it from partial data.
+- If Jira or GitLab is unreachable, or answers only some of the queries, sync
+  keeps the previous `state` instead of recomputing it from partial data.
+- A key found on the work of several tasks (an MR whose branch and title name
+  keys of different tasks) is shown in each but written into none: which task
+  it is for is the user's call (`wt attach`).
 
 ### Agent context
 

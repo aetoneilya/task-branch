@@ -80,6 +80,8 @@ struct App {
     synced: Option<chrono::DateTime<chrono::Local>>,
     details: HashMap<Detail, String>,
     pending: HashSet<Detail>,
+    /// Loaded details to read again, shown as they were meanwhile.
+    stale: HashSet<Detail>,
     detail_scroll: u16,
     tx: Sender<Update>,
     rx: Receiver<Update>,
@@ -116,6 +118,7 @@ impl App {
             synced: None,
             details: HashMap::new(),
             pending: HashSet::new(),
+            stale: HashSet::new(),
             detail_scroll: 0,
             tx,
             rx,
@@ -236,6 +239,12 @@ impl App {
                 self.agents_polling = false;
                 self.agents_polled = Instant::now();
                 self.table.update_agents(&agents);
+                // their screens moved on too: read again after each poll
+                let screens = self
+                    .details
+                    .keys()
+                    .filter(|d| matches!(d, Detail::Screen(_)));
+                self.stale.extend(screens.cloned());
                 self.rebuild();
             }
         }

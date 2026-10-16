@@ -5,10 +5,12 @@ use super::common::{current_repo, err, find_task, fuzzy, is_ticket_key};
 use super::launch::{launch, open_agent};
 use crate::cli::SelectArgs;
 use crate::cli::load;
+use crate::client::sessions::Session;
 use crate::client::{herdr, worktree};
 use crate::config::Config;
 use crate::table::{self, Table, TaskRow};
 use crate::vault::task::SessionRef;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 enum Work {
@@ -56,7 +58,7 @@ pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<()
                 .collect()
         })
         .unwrap_or_default();
-    sessions.sort_by(|a, b| b.date.cmp(&a.date));
+    newest_first(&mut sessions, &table.sessions);
 
     if pick_session {
         if sessions.is_empty() {
@@ -125,6 +127,17 @@ pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<()
     }
     let brief = brief_path(&tree.wt.path)?;
     launch(&space, &tree.wt.path, &tree.wt.name(), note, &brief, !bg)
+}
+
+/// Newest first: by date, and sessions of one day by their transcript's last
+/// activity, when the transcript is still there.
+fn newest_first(sessions: &mut [SessionRef], transcripts: &HashMap<String, Session>) {
+    let modified = |s: &SessionRef| transcripts.get(&s.id).map(|t| t.modified);
+    sessions.sort_by(|a, b| {
+        b.date
+            .cmp(&a.date)
+            .then_with(|| modified(b).cmp(&modified(a)))
+    });
 }
 
 /// `claude --resume` must run where the session was launched — often the main
@@ -265,4 +278,40 @@ fn pick_work(table: &Table) -> Result<Work, String> {
     let labels: Vec<String> = items.iter().map(|(l, _, _)| l.clone()).collect();
     let chosen = fuzzy("Back to", &labels)?;
     Ok(items.swap_remove(chosen).1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resumes_the_latest_session_of_the_day() {
+        let session = |id: &str, date: &str| SessionRef {
+            id: id.to_string(),
+            worktree: "a".to_string(),
+            date: date.to_string(),
+        };
+        let mut sessions = vec![
+            session("old", "2026-10-01"),
+            session("morning", "2026-10-08"),
+            session("gone", "2026-10-08"),
+            session("evening", "2026-10-08"),
+        ];
+        let transcript = |id: &str, modified: u64| Session {
+            id: id.to_string(),
+            date: "2026-10-08".to_string(),
+            cwds: Vec::new(),
+            first_cwd: None,
+            last_cwd: None,
+            modified,
+        };
+        let transcripts: HashMap<String, Session> =
+            [transcript("morning", 100), transcript("evening", 200)]
+                .into_iter()
+                .map(|t| (t.id.clone(), t))
+                .collect();
+        newest_first(&mut sessions, &transcripts);
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["evening", "morning", "gone", "old"]);
+    }
 }

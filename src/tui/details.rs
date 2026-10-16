@@ -55,9 +55,11 @@ impl App {
         let Some(detail) = self.current().and_then(|r| self.detail(&r.kind)) else {
             return;
         };
-        if self.details.contains_key(&detail) || self.pending.contains(&detail) {
+        let loaded = self.details.contains_key(&detail) && !self.stale.contains(&detail);
+        if loaded || self.pending.contains(&detail) {
             return;
         }
+        self.stale.remove(&detail);
         self.pending.insert(detail.clone());
         let (config, tx) = (self.config.clone(), self.tx.clone());
         std::thread::spawn(move || {

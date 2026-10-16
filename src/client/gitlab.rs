@@ -1,3 +1,4 @@
+use super::joined;
 use reqwest::Url;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -7,13 +8,6 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 pub struct GitLab {
     client: Client,
     host: String,
-}
-
-/// The value of a scoped thread, or an error when it panicked.
-fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, Result<T, String>>) -> Result<T, String> {
-    handle
-        .join()
-        .unwrap_or_else(|_| Err("a GitLab request panicked".to_string()))
 }
 
 impl GitLab {
@@ -122,7 +116,11 @@ impl GitLab {
         let (mr, approvals, discussions) = std::thread::scope(|scope| {
             let approvals = scope.spawn(|| get(&["approvals"], &[]));
             let discussions = scope.spawn(|| get(&["discussions"], &[("per_page", "100")]));
-            (get(&[], &[]), joined(approvals), joined(discussions))
+            (
+                get(&[], &[]),
+                joined(approvals, "a GitLab request"),
+                joined(discussions, "a GitLab request"),
+            )
         });
         let pipeline = mr?
             .pointer("/head_pipeline/status")

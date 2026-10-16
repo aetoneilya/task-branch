@@ -17,6 +17,10 @@ pub struct Session {
     /// Where claude was launched: `--resume` finds the session only from there.
     pub first_cwd: Option<String>,
     pub last_cwd: Option<String>,
+    /// Unix time the transcript last changed: the session's last activity. Taken
+    /// from the file, not cached with the parsed transcript.
+    #[serde(skip)]
+    pub modified: u64,
 }
 
 impl Session {
@@ -90,7 +94,8 @@ impl Cache {
         }
     }
 
-    pub fn save(&self) {
+    pub fn save(&mut self) {
+        self.prune();
         if !self.dirty {
             return;
         }
@@ -104,6 +109,13 @@ impl Cache {
                 let _ = std::fs::rename(tmp, path);
             }
         }
+    }
+
+    /// Forgets transcripts that are gone: Claude Code deletes old ones.
+    fn prune(&mut self) {
+        let before = self.entries.len();
+        self.entries.retain(|file, _| Path::new(file).exists());
+        self.dirty |= self.entries.len() != before;
     }
 
     fn session(&mut self, file: &Path) -> Option<Session> {
@@ -120,9 +132,15 @@ impl Cache {
             && entry.len == len
             && entry.mtime == mtime
         {
-            return Some(entry.session.clone());
+            return Some(Session {
+                modified: mtime,
+                ..entry.session.clone()
+            });
         }
-        let session = parse(file)?;
+        let session = Session {
+            modified: mtime,
+            ..parse(file)?
+        };
         self.entries.insert(
             key,
             Entry {
@@ -184,6 +202,7 @@ fn parse(file: &Path) -> Option<Session> {
         cwds,
         first_cwd,
         last_cwd: last_cwd.map(str::to_string),
+        modified: 0,
     })
 }
 
@@ -227,11 +246,33 @@ mod tests {
             ],
             first_cwd: None,
             last_cwd: None,
+            modified: 0,
         };
         assert_eq!(
             session.worktrees_under(Path::new("/r/.claude/worktrees")),
             vec!["a2i", "b"]
         );
+    }
+
+    #[test]
+    fn forgets_deleted_transcripts() {
+        let dir = std::env::temp_dir().join(format!("worktable-sessions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kept = dir.join("kept.jsonl");
+        std::fs::write(&kept, r#"{"cwd":"/a","timestamp":"2026-10-08T10:00:00Z"}"#).unwrap();
+        let mut cache = Cache::default();
+        assert!(cache.session(&kept).is_some_and(|s| s.modified > 0));
+        let gone = dir.join("gone.jsonl");
+        std::fs::write(&gone, r#"{"cwd":"/b","timestamp":"2026-10-09T10:00:00Z"}"#).unwrap();
+        cache.session(&gone).unwrap();
+        std::fs::remove_file(&gone).unwrap();
+        cache.dirty = false;
+
+        cache.prune();
+        let files: Vec<&String> = cache.entries.keys().collect();
+        assert_eq!(files, vec![&kept.to_string_lossy().to_string()]);
+        assert!(cache.dirty);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

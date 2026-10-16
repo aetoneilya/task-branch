@@ -2,7 +2,7 @@
 //! notes in a temp directory, everything else is built in memory.
 
 use super::matching::{Inputs, assemble};
-use super::{Category, Mr, Table, Ticket, Tree};
+use super::{Category, Fresh, Mr, Source, Table, Ticket, Tree};
 use crate::client::gitlab::MergeRequest;
 use crate::client::herdr;
 use crate::client::worktree::Worktree;
@@ -121,8 +121,17 @@ pub fn inputs(tasks: Vec<Task>, tickets: Vec<Ticket>, mrs: Vec<Mr>, trees: Vec<T
         sessions: HashMap::new(),
         roots: vec![PathBuf::from(ROOT)],
         complete: true,
+        jira: live(),
+        gitlab: live(),
         warnings: Vec::new(),
         jira_host: "https://jira".to_string(),
+    }
+}
+
+fn live() -> Source {
+    Source {
+        fresh: Fresh::Live,
+        warning: None,
     }
 }
 

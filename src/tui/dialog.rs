@@ -26,6 +26,8 @@ pub(super) enum Dialog {
     },
     /// A command running, then finished: what it said, and what it asks.
     Report(Report),
+    /// `v`: which kinds of rows are shown; the selected toggle.
+    Hide { selected: usize },
 }
 
 pub(super) struct Report {
@@ -312,6 +314,7 @@ impl App {
                 self.run_command(title, Then::Show, move |config, ui| action.run(config, ui))
             }
             Some(Dialog::Confirm { .. }) if close => {}
+            Some(Dialog::Hide { selected }) => self.on_hide_key(key, selected),
             Some(Dialog::Report(mut report)) => {
                 if report.question.is_some() {
                     answer(&mut report, key);
@@ -368,6 +371,11 @@ impl App {
                 };
                 (&report.title, text, hint)
             }
+            Dialog::Hide { selected } => (
+                "show",
+                super::hide::lines(self.hide, *selected),
+                "↑↓ move   space toggle   1-7 toggle   Esc close",
+            ),
         };
 
         let area = frame.area();

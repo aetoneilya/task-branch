@@ -64,7 +64,10 @@ impl App {
             .iter()
             .map(|r| ListItem::new(r.line.clone()))
             .collect();
-        let title = if self.all { " all " } else { " active " };
+        let mut title = if self.all { " all " } else { " active " }.to_string();
+        if self.hide.any() {
+            title.push_str(&format!("· hidden: {} ", super::hide::summary(self.hide)));
+        }
         let list = List::new(items)
             .block(
                 Block::bordered()
@@ -191,6 +194,7 @@ impl App {
             ("n", "new task"),
             ("/", "filter"),
             (".", all),
+            ("v", "show"),
             ("p", preview),
             ("r", "refresh"),
             ("?", "help"),
@@ -275,6 +279,7 @@ impl App {
             "N          add a dated line to the task note",
             "R          review worktree (wt review)  d  worktree: remove it; task: close it with its Jira tickets",
             "/          filter, Esc clears           .  all / active only      r  refresh",
+            "v          show / hide tasks, tickets, MRs, worktrees, agents, sections",
             "w          next agent waiting for you (blocked, or done and unseen)",
             "p          show / hide details (hidden by default under 110 columns)",
             "ctrl-d/u   scroll details               ctrl-l  redraw            q  quit",

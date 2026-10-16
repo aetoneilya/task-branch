@@ -5,6 +5,7 @@
 //! to me in Jira` one (my open tickets nothing is done on yet).
 
 use super::{Category, Table};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
@@ -69,19 +70,42 @@ pub struct Options<'a> {
     pub filter: &'a str,
     /// Only tasks with this tag, and none of the sections.
     pub tag: Option<&'a str>,
-    /// No ticket rows under tasks: their MRs move up to the task, once each.
-    pub hide_tickets: bool,
+    pub hide: Hide,
+}
+
+/// Kinds of rows left out of the view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Hide {
+    /// Tasks and everything under them.
+    pub tasks: bool,
+    /// Ticket rows under tasks: their MRs move up to the task, once each.
+    pub tickets: bool,
+    pub mrs: bool,
+    /// Worktrees, and their agents with them; an MR a worktree held goes under
+    /// its ticket.
+    pub trees: bool,
+    pub agents: bool,
+    pub no_task: bool,
+    pub assigned: bool,
+}
+
+impl Hide {
+    pub fn any(&self) -> bool {
+        *self != Hide::default()
+    }
 }
 
 pub fn build(table: &Table, options: &Options) -> Vec<Node> {
     let all = options.all;
+    let hide = options.hide;
     let filter = options.filter.to_lowercase();
     let keep = |text: String| filter.is_empty() || text.to_lowercase().contains(&filter);
     let mut roots = Vec::new();
 
     // the table keeps tasks by state, newest first; done ones come last
     for (i, row) in table.tasks.iter().enumerate() {
-        if row.task.done && !all {
+        if hide.tasks || (row.task.done && !all) {
             continue;
         }
         if options
@@ -108,8 +132,8 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
             continue;
         }
         // an MR from a shown worktree's branch hangs under that worktree
-        let (trees, held) = tree_nodes(table, &row.trees, all);
-        let free_mr = |m: usize| !held.contains(&m) && (all || table.mr(m).opened());
+        let (trees, held) = tree_nodes(table, &row.trees, all, hide);
+        let free_mr = |m: usize| !hide.mrs && !held.contains(&m) && (all || table.mr(m).opened());
         let mut children = Vec::new();
         let mut lifted = Vec::new();
         for key in row.tickets() {
@@ -118,7 +142,7 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
                 .iter()
                 .copied()
                 .filter(|&m| table.mr(m).keys.contains(key) && free_mr(m));
-            if options.hide_tickets {
+            if hide.tickets {
                 // an MR with the keys of two tickets is under both
                 for m in mrs {
                     if !lifted.contains(&m) {
@@ -183,12 +207,12 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
         if !keep(text) {
             continue;
         }
-        let (trees, held) = tree_nodes(table, &loose.trees, all);
+        let (trees, held) = tree_nodes(table, &loose.trees, all, hide);
         let mut children: Vec<Node> = loose
             .mrs
             .iter()
             .copied()
-            .filter(|&m| !held.contains(&m) && (all || table.mr(m).opened()))
+            .filter(|&m| !hide.mrs && !held.contains(&m) && (all || table.mr(m).opened()))
             .map(mr_node)
             .collect();
         children.extend(trees);
@@ -204,7 +228,7 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
         }
     }
 
-    for node in tree_nodes(table, &table.other_trees, all).0 {
+    for node in tree_nodes(table, &table.other_trees, all, hide).0 {
         if let Kind::Tree(t) = node.kind
             && keep(format!(
                 "{} {}",
@@ -215,7 +239,7 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
             no_task.push(node);
         }
     }
-    if all {
+    if all && !hide.mrs {
         for &m in &table.other_mrs {
             if keep(table.mr(m).mr.title().to_string()) {
                 no_task.push(mr_node(m));
@@ -230,8 +254,11 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
         },
         _ => 2,
     });
-    for (section, nodes) in [(Section::NoTask, no_task), (Section::Assigned, assigned)] {
-        if !nodes.is_empty() {
+    for (section, nodes, hidden) in [
+        (Section::NoTask, no_task, hide.no_task),
+        (Section::Assigned, assigned, hide.assigned),
+    ] {
+        if !hidden && !nodes.is_empty() {
             roots.push(Node::leaf(
                 format!("header:{}", section.title()),
                 Kind::Header(section),
@@ -257,7 +284,10 @@ fn mr_node(m: usize) -> Node {
 /// Worktrees with agents first, then by changed files, then by name; finished
 /// ones only with `all`. Under each, the MR of its branch and its agents. Also
 /// returns the MRs placed so, which go nowhere else.
-fn tree_nodes(table: &Table, trees: &[usize], all: bool) -> (Vec<Node>, Vec<usize>) {
+fn tree_nodes(table: &Table, trees: &[usize], all: bool, hide: Hide) -> (Vec<Node>, Vec<usize>) {
+    if hide.trees {
+        return (Vec::new(), Vec::new());
+    }
     let mut trees: Vec<usize> = trees
         .iter()
         .copied()
@@ -278,9 +308,9 @@ fn tree_nodes(table: &Table, trees: &[usize], all: bool) -> (Vec<Node>, Vec<usiz
             let tree = table.tree(t);
             let mr = tree
                 .mr
-                .filter(|&m| all || table.mr(m).opened())
+                .filter(|&m| !hide.mrs && (all || table.mr(m).opened()))
                 .map(mr_node);
-            let agents = (0..tree.agents.len()).map(|a| {
+            let agents = (0..tree.agents.len()).filter(|_| !hide.agents).map(|a| {
                 Node::leaf(
                     format!("agent:{}:{a}", tree.wt.path.display()),
                     Kind::Agent(t, a),
@@ -363,7 +393,10 @@ mod tests {
         );
         let m10 = table.mr_index(10);
         let options = Options {
-            hide_tickets: true,
+            hide: Hide {
+                tickets: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert_eq!(
@@ -372,6 +405,73 @@ mod tests {
                 "task:a2i".to_string(),
                 format!("  mr:{m10}"),
                 "  tree:/a".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_kinds_leave_the_view() {
+        let mut inputs = inputs(
+            vec![task("a2i", &["UCP-1"])],
+            vec![ticket("UCP-5", Category::New, true)],
+            vec![
+                mr(10, "i.udalov/UCP-1-a", "a", "opened"),
+                mr(11, "i.udalov/UCP-1-b", "b", "opened"),
+            ],
+            vec![tree("a", "i.udalov/UCP-1-a"), tree("misc", "i.udalov/misc")],
+        );
+        inputs.agents = vec![agent("x", "a", "w")];
+        let table = assemble(inputs);
+        let (m10, m11) = (table.mr_index(10), table.mr_index(11));
+        let shown = |hide: Hide| {
+            outline(&build(
+                &table,
+                &Options {
+                    hide,
+                    ..Default::default()
+                },
+            ))
+        };
+        assert_eq!(
+            shown(Hide {
+                mrs: true,
+                agents: true,
+                assigned: true,
+                ..Default::default()
+            }),
+            vec![
+                "task:a2i",
+                "  ticket:a2i:UCP-1",
+                "  tree:/a",
+                "header:no task",
+                "tree:/misc"
+            ]
+        );
+        // without worktrees, the MR one held goes under its ticket
+        assert_eq!(
+            shown(Hide {
+                trees: true,
+                no_task: true,
+                assigned: true,
+                ..Default::default()
+            }),
+            vec![
+                "task:a2i".to_string(),
+                "  ticket:a2i:UCP-1".to_string(),
+                format!("    mr:{m10}"),
+                format!("    mr:{m11}"),
+            ]
+        );
+        assert_eq!(
+            shown(Hide {
+                tasks: true,
+                ..Default::default()
+            }),
+            vec![
+                "header:no task",
+                "tree:/misc",
+                "header:assigned to me in Jira",
+                "loose:UCP-5"
             ]
         );
     }

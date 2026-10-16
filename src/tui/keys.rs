@@ -69,6 +69,7 @@ impl App {
             }
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('w') => self.next_waiting(),
+            KeyCode::Char('v') => self.open_hide(),
             KeyCode::Char('N') => match self.note() {
                 Some(path) => self.prompt = Some((Prompt::NoteLine(path), String::new())),
                 None => self.say("no note here"),

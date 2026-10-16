@@ -126,7 +126,10 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
             all,
             filter: "",
             tag,
-            hide_tickets: !all,
+            hide: view::Hide {
+                tickets: !all,
+                ..Default::default()
+            },
         },
     );
     let mut rows: Vec<[Cell; 4]> = Vec::new();

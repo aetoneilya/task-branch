@@ -3,7 +3,7 @@
 
 use crate::table::look::{self, Piece, Tone};
 pub use crate::table::view::Kind;
-use crate::table::view::{self, Node};
+use crate::table::view::{self, Hide, Node};
 use crate::table::{Agent, RowState, Table};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -20,10 +20,17 @@ pub struct Row {
 }
 
 /// The view's tree as list rows, folded nodes without their children.
-pub fn build(table: &Table, all: bool, filter: &str, folded: &HashSet<String>) -> Vec<Row> {
+pub fn build(
+    table: &Table,
+    all: bool,
+    hide: Hide,
+    filter: &str,
+    folded: &HashSet<String>,
+) -> Vec<Row> {
     let options = view::Options {
         all,
         filter,
+        hide,
         ..Default::default()
     };
     let mut rows = Rows {

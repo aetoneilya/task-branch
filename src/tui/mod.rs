@@ -7,11 +7,13 @@
 mod details;
 mod dialog;
 mod draw;
+mod hide;
 mod keys;
 mod rows;
 
 use crate::client::herdr;
 use crate::config::Config;
+use crate::table::view::Hide;
 use crate::table::{self, Table};
 use crate::vault::{self, note::NoteError};
 use details::Detail;
@@ -79,6 +81,8 @@ struct App {
     selected: Option<String>,
     folded: HashSet<String>,
     all: bool,
+    /// Kinds of rows left out, `v`; kept between runs.
+    hide: Hide,
     filter: String,
     prompt: Option<(Prompt, String)>,
     dialog: Option<Dialog>,
@@ -121,6 +125,7 @@ impl App {
             selected: None,
             folded: HashSet::new(),
             all: false,
+            hide: hide::load(),
             filter: String::new(),
             prompt: None,
             dialog: None,
@@ -207,13 +212,17 @@ impl App {
         });
     }
 
-    /// Agent rows whose agent waits for me: asking (blocked) or finished unseen (done).
+    /// Agent rows whose agent waits for me: asking (blocked) or finished unseen
+    /// (done). With agents hidden, their worktrees' rows.
     fn waiting(&self) -> Vec<usize> {
         self.rows
             .iter()
             .enumerate()
             .filter(|(_, r)| match r.kind {
                 Kind::Agent(t, a) => self.table.tree(t).agents[a].status.waiting(),
+                Kind::Tree(t) if self.hide.agents => {
+                    self.table.tree(t).agents.iter().any(|a| a.status.waiting())
+                }
                 _ => false,
             })
             .map(|(i, _)| i)
@@ -274,7 +283,7 @@ impl App {
 
     /// Rows from the table, keeping the selection on the same item.
     fn rebuild(&mut self) {
-        self.rows = rows::build(&self.table, self.all, &self.filter, &self.folded);
+        self.rows = rows::build(&self.table, self.all, self.hide, &self.filter, &self.folded);
         let index = self
             .selected
             .as_ref()

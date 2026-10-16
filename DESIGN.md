@@ -289,6 +289,9 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
   MR, and worktrees without a ticket. Below `assigned to me in Jira`: my open
   tickets nothing is done on yet, in progress first. `.` adds done tasks, merged
   MRs, finished worktrees.
+- **Hide**: `v` toggles tasks, tickets under tasks, MRs, worktrees, agents and
+  each section out of the tree; the choice is kept in `tui.json` in the cache.
+  With agents hidden, `w` goes to their worktrees.
 - **Filter**: `/` over task names, tags, tickets and summaries, branches.
 - **Details** follow the selection: the note body for a task, the Jira
   description for a ticket, the MR, `git status` + unpushed and branch commits for
@@ -306,6 +309,7 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 | `a` | ticket without a task | `wt attach KEY`: pick a task, the key joins its `tickets:` |
 | `N` | anything under a task | a dated line at the end of the note's own text |
 | `w` | — | next agent waiting for me |
+| `v` | — | what kinds of rows to show |
 | `p` | — | details pane on/off (hidden under 110 columns) |
 | `n` | — | asks a name for `wt start` |
 | `c` | task, ticket | `wt select --session` |

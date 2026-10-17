@@ -172,8 +172,10 @@ and can be resumed later, also after the worktree was removed.
 - **archive** — `done == true`: name, tags, tickets, mrs, closed; sorted by `closed`.
 - **all** — sorted by mtime.
 
-Task folders are read in place (`30-work/tasks`, `30-work/projects`); notes are
-never moved — moves resurrect old copies through the phone sync.
+Task folders are read in place; notes are never moved by `wt` — a move made
+while the phone is not synced resurrects the old copy there. Projects moved
+into `30-work/tasks` by hand (2026-10-17, phone synced first): a project is a
+task tagged `project`, shown by `projects.base`.
 
 ## CLI
 
@@ -343,7 +345,7 @@ project = "ai/ucp"          # used when no [[repo]] names a project
 
 [vault]
 path = "~/machrist-vault"
-task_dirs = ["30-work/tasks", "30-work/projects"]
+task_dirs = ["30-work/tasks"]
 new_task_dir = "30-work/tasks"
 
 [[repo]]

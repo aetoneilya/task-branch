@@ -29,7 +29,7 @@ project = "ai/ucp"
 
 [vault]
 path = "~/machrist-vault"
-task_dirs = ["30-work/tasks", "30-work/projects"]
+task_dirs = ["30-work/tasks"]
 new_task_dir = "30-work/tasks"
 
 [[repo]]

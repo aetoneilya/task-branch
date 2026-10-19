@@ -180,7 +180,10 @@ impl App {
             lines.push(Line::from(""));
             match self.details.get(&detail) {
                 Some(text) => lines.extend(text.lines().map(|l| Line::from(clean(l)))),
-                None => lines.push(Line::from(dim("loading…"))),
+                None => lines.push(Line::from(dim(format!(
+                    "{} loading",
+                    super::anim::spinner()
+                )))),
             }
         }
         lines

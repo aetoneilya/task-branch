@@ -1,8 +1,8 @@
 //! Drawing: the task tree, prompt line, footer hints, help.
 
 use super::{
-    App, MESSAGE_FOR, PREVIEW_MIN_WIDTH, Prompt,
-    rows::{AgentAt, Kind},
+    App, MESSAGE_FOR, PREVIEW_MIN_WIDTH, Prompt, anim,
+    rows::{self, AgentAt, Kind},
 };
 use crate::table::look::clean;
 use crate::table::view::Section;
@@ -65,7 +65,16 @@ impl App {
         let items: Vec<ListItem> = self
             .rows
             .iter()
-            .map(|r| ListItem::new(r.line.clone()))
+            .map(|r| {
+                let mut line = r.line.clone();
+                // a working agent's spinner moves: its status is the row's last span
+                if let Kind::Agent(at, a) = r.kind
+                    && let Some(last) = line.spans.last_mut()
+                {
+                    *last = rows::agent_status_span(self.table.agent(at, a).status);
+                }
+                ListItem::new(line)
+            })
             .collect();
         let mut title = if self.all { " all " } else { " active " }.to_string();
         if self.hide.any() {
@@ -249,7 +258,23 @@ impl App {
             ));
         }
         spans.push(if self.refreshing {
-            Span::styled("⟳ refreshing…", Style::default().fg(Color::Yellow))
+            let elapsed = self.last_refresh.elapsed();
+            // filled against the last refresh, never quite full; unknown at first
+            let bar = match self.refresh_took {
+                Some(took) => anim::bar(
+                    0.95_f64.min(elapsed.as_secs_f64() / took.as_secs_f64().max(0.1)),
+                    10,
+                ),
+                None => anim::bounce(10),
+            };
+            Span::styled(
+                format!(
+                    "{} refreshing {bar} {}s",
+                    anim::spinner(),
+                    elapsed.as_secs()
+                ),
+                Style::default().fg(Color::Yellow),
+            )
         } else if let Some(synced) = self.synced {
             Span::styled(
                 format!("synced {}", synced.format("%H:%M")),

@@ -4,6 +4,7 @@
 //! Actions run the same commands as `wt` does, in the background: they report
 //! and ask in a dialog.
 
+mod anim;
 mod details;
 mod dialog;
 mod draw;
@@ -95,6 +96,8 @@ struct App {
     preview_shown: bool,
     refreshing: bool,
     last_refresh: Instant,
+    /// How long the last refresh took: the header's bar fills against it.
+    refresh_took: Option<Duration>,
     synced: Option<chrono::DateTime<chrono::Local>>,
     details: HashMap<Detail, String>,
     pending: HashSet<Detail>,
@@ -135,6 +138,7 @@ impl App {
             preview_shown: true,
             refreshing: false,
             last_refresh: Instant::now(),
+            refresh_took: None,
             synced: None,
             details: HashMap::new(),
             pending: HashSet::new(),
@@ -159,7 +163,12 @@ impl App {
         while !self.quit {
             self.load_details();
             terminal.draw(|f| self.draw(f)).map_err(|e| e.to_string())?;
-            if event::poll(Duration::from_millis(200)).map_err(|e| e.to_string())?
+            let wait = if self.animating() {
+                anim::FRAME
+            } else {
+                Duration::from_millis(200)
+            };
+            if event::poll(wait).map_err(|e| e.to_string())?
                 && let Event::Key(key) = event::read().map_err(|e| e.to_string())?
                 && key.kind == KeyEventKind::Press
             {
@@ -199,6 +208,18 @@ impl App {
             let updated = table::write_back(&mut table);
             let _ = tx.send(Update::Table(Box::new(table), updated));
         });
+    }
+
+    /// Something on screen moves: a refresh, a command, details loading, or an
+    /// agent at work.
+    fn animating(&self) -> bool {
+        self.refreshing
+            || self.dialog.as_ref().is_some_and(Dialog::busy)
+            || (self.preview_shown && !self.pending.is_empty())
+            || self.rows.iter().any(|r| match r.kind {
+                Kind::Agent(at, a) => self.table.agent(at, a).status == table::AgentStatus::Working,
+                _ => false,
+            })
     }
 
     fn poll_agents(&mut self) {
@@ -242,6 +263,7 @@ impl App {
                 self.table = *table;
                 self.online = true;
                 self.refreshing = false;
+                self.refresh_took = Some(self.last_refresh.elapsed());
                 self.synced = Some(chrono::Local::now());
                 self.details.clear();
                 if let Some(warning) = self.table.warnings.first() {

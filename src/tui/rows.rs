@@ -4,7 +4,7 @@
 use crate::table::look::{self, Piece, Tone};
 use crate::table::view::{self, Hide, Node};
 pub use crate::table::view::{AgentAt, Kind};
-use crate::table::{Agent, RowState, Table};
+use crate::table::{Agent, AgentStatus, RowState, Table};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashSet;
@@ -130,11 +130,21 @@ pub fn dim(text: impl Into<String>) -> Span<'static> {
 }
 
 /// `◉ name status`, the name in `tone`.
+/// The status is the last span: `agent_status_span`.
 pub fn agent_spans(agent: &Agent, tone: Tone) -> Vec<Span<'static>> {
-    spans([
-        Piece::new(format!("{} {}", look::AGENT, agent.name), tone),
-        look::agent_status(agent.status).after(" "),
-    ])
+    vec![
+        Piece::new(format!("{} {}", look::AGENT, agent.name), tone).into(),
+        agent_status_span(agent.status),
+    ]
+}
+
+/// ` status`, with a spinner while the agent works.
+pub fn agent_status_span(status: AgentStatus) -> Span<'static> {
+    let mut piece = look::agent_status(status);
+    if status == AgentStatus::Working {
+        piece.text = format!("{} {}", super::anim::spinner(), piece.text);
+    }
+    piece.after(" ").into()
 }
 
 fn label(table: &Table, kind: &Kind) -> Vec<Span<'static>> {

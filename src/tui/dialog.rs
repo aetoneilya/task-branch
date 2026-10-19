@@ -30,6 +30,17 @@ pub(super) enum Dialog {
     Hide { selected: usize },
 }
 
+impl Dialog {
+    /// Waiting on something: its spinner has to move.
+    pub(super) fn busy(&self) -> bool {
+        match self {
+            Dialog::Checking(_) => true,
+            Dialog::Report(report) => !report.finished && report.question.is_none(),
+            _ => false,
+        }
+    }
+}
+
 pub(super) struct Report {
     title: String,
     lines: Vec<String>,
@@ -340,7 +351,11 @@ impl App {
             Line::from(Span::styled(l.clone(), style))
         };
         let (title, mut text, hint): (&str, Vec<Line>, &str) = match dialog {
-            Dialog::Checking(title) => (title, vec![Line::raw("checking…")], "Esc cancel"),
+            Dialog::Checking(title) => (
+                title,
+                vec![Line::raw(format!("{} checking", super::anim::spinner()))],
+                "Esc cancel",
+            ),
             Dialog::Confirm {
                 title,
                 lines,
@@ -367,7 +382,14 @@ impl App {
                         }
                     }
                     None if report.finished => "any key closes",
-                    None => "working…",
+                    None => {
+                        text.push(Line::raw(""));
+                        text.push(Line::styled(
+                            format!("{} working", super::anim::spinner()),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                        "wait for it to finish"
+                    }
                 };
                 (&report.title, text, hint)
             }

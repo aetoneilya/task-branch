@@ -86,7 +86,7 @@ enum Update {
     Ask {
         prompt: String,
         items: Vec<String>,
-        reply: Sender<Option<usize>>,
+        reply: dialog::Reply,
     },
     Finished(Result<(), String>),
 }

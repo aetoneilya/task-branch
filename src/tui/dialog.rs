@@ -62,15 +62,30 @@ pub(super) enum Then {
     Navigate,
 }
 
+/// Where a running command waits for its answer; None is cancelled.
+pub(super) enum Reply {
+    /// An item's index; with no items, 0 is yes and 1 no.
+    Pick(Sender<Option<usize>>),
+    /// A line of text.
+    Text(Sender<Option<String>>),
+}
+
 /// A question of a running command; it waits for the answer on `reply`.
 struct Question {
     prompt: String,
-    /// Empty: yes or no.
+    /// Empty: yes or no, or text.
     items: Vec<String>,
+    /// What is typed: the filter of a pick, the answer of a text question.
     filter: String,
     /// Into the items the filter leaves.
     selected: usize,
-    reply: Sender<Option<usize>>,
+    reply: Reply,
+}
+
+impl Question {
+    fn is_text(&self) -> bool {
+        matches!(self.reply, Reply::Text(_))
+    }
 }
 
 impl Question {
@@ -98,13 +113,23 @@ struct Remote(Sender<Update>);
 impl Remote {
     fn ask(&self, prompt: &str, items: Vec<String>) -> Result<Option<usize>, String> {
         let (reply, answer) = channel();
+        self.send_question(prompt, items, Reply::Pick(reply))?;
+        answer.recv().map_err(|_| "cancelled".to_string())
+    }
+
+    fn ask_text(&self, prompt: &str) -> Result<Option<String>, String> {
+        let (reply, answer) = channel();
+        self.send_question(prompt, Vec::new(), Reply::Text(reply))?;
+        answer.recv().map_err(|_| "cancelled".to_string())
+    }
+
+    fn send_question(&self, prompt: &str, items: Vec<String>, reply: Reply) -> Result<(), String> {
         let question = Update::Ask {
             prompt: prompt.to_string(),
             items,
             reply,
         };
-        self.0.send(question).map_err(|_| "cancelled".to_string())?;
-        answer.recv().map_err(|_| "cancelled".to_string())
+        self.0.send(question).map_err(|_| "cancelled".to_string())
     }
 }
 
@@ -122,9 +147,9 @@ impl Ui for Remote {
         Ok(self.ask(prompt, Vec::new())? == Some(0))
     }
 
-    /// The TUI asks for names with its own prompt line, before the command.
     fn input(&mut self, prompt: &str) -> Result<String, String> {
-        Err(format!("{prompt}: not asked in the TUI"))
+        self.ask_text(prompt)?
+            .ok_or_else(|| "cancelled".to_string())
     }
 }
 
@@ -266,12 +291,7 @@ impl App {
         }
     }
 
-    pub(super) fn on_ask(
-        &mut self,
-        prompt: String,
-        items: Vec<String>,
-        reply: Sender<Option<usize>>,
-    ) {
+    pub(super) fn on_ask(&mut self, prompt: String, items: Vec<String>, reply: Reply) {
         // no dialog to ask in: dropping `reply` cancels the question
         if let Some(Dialog::Report(report)) = &mut self.dialog {
             report.question = Some(Question {
@@ -375,7 +395,9 @@ impl App {
                 let hint = match &report.question {
                     Some(question) => {
                         text.extend(question_lines(question));
-                        if question.items.is_empty() {
+                        if question.is_text() {
+                            "type   ⏎ ok   Esc cancel"
+                        } else if question.items.is_empty() {
                             "y yes   n no   Esc cancel"
                         } else {
                             "type to filter   ↑↓ move   ⏎ pick   Esc cancel"
@@ -449,6 +471,29 @@ fn answer(report: &mut Report, key: KeyEvent) {
         return;
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if let Reply::Text(reply) = &question.reply {
+        let answer = match key.code {
+            KeyCode::Esc => Some(None),
+            KeyCode::Enter if !question.filter.trim().is_empty() => {
+                Some(Some(question.filter.trim().to_string()))
+            }
+            KeyCode::Backspace => {
+                question.filter.pop();
+                None
+            }
+            KeyCode::Char(c) if !ctrl => {
+                question.filter.push(c);
+                None
+            }
+            _ => None,
+        };
+        if let Some(answer) = answer {
+            report.cancelled = answer.is_none();
+            let _ = reply.send(answer);
+            report.question = None;
+        }
+        return;
+    }
     let reply = if question.items.is_empty() {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => Some(Some(0)),
@@ -490,9 +535,9 @@ fn answer(report: &mut Report, key: KeyEvent) {
             _ => None,
         }
     };
-    if let Some(reply) = reply {
+    if let (Some(answer), Reply::Pick(reply)) = (reply, &question.reply) {
         report.cancelled = key.code == KeyCode::Esc;
-        let _ = question.reply.send(reply);
+        let _ = reply.send(answer);
         report.question = None;
     }
 }
@@ -502,6 +547,12 @@ const PICK_ROWS: usize = 12;
 
 fn question_lines(question: &Question) -> Vec<Line<'static>> {
     let yellow = Style::default().fg(Color::Yellow);
+    if question.is_text() {
+        return vec![Line::from(vec![
+            Span::styled(format!("{}: ", question.prompt), yellow),
+            Span::raw(format!("{}▏", question.filter)),
+        ])];
+    }
     if question.items.is_empty() {
         return vec![Line::from(Span::styled(
             format!("{}?", question.prompt.trim_end_matches('?')),
@@ -539,4 +590,54 @@ fn question_lines(question: &Question) -> Vec<Line<'static>> {
         ));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    fn report(reply: Reply) -> Report {
+        Report {
+            title: String::new(),
+            lines: Vec::new(),
+            finished: false,
+            then: Then::Show,
+            question: Some(Question {
+                prompt: "Task name".to_string(),
+                items: Vec::new(),
+                filter: String::new(),
+                selected: 0,
+                reply,
+            }),
+            cancelled: false,
+        }
+    }
+
+    fn press(report: &mut Report, code: KeyCode) {
+        answer(report, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn a_text_question_is_typed_and_sent() {
+        let (tx, rx) = channel();
+        let mut report = report(Reply::Text(tx));
+        // nothing typed: Enter waits
+        press(&mut report, KeyCode::Enter);
+        assert!(report.question.is_some());
+        for c in "ab".chars() {
+            press(&mut report, KeyCode::Char(c));
+        }
+        press(&mut report, KeyCode::Backspace);
+        press(&mut report, KeyCode::Char('c'));
+        press(&mut report, KeyCode::Enter);
+        assert_eq!(rx.recv().unwrap(), Some("ac".to_string()));
+        assert!(report.question.is_none() && !report.cancelled);
+
+        let (tx, rx) = channel();
+        let mut report = super::tests::report(Reply::Text(tx));
+        press(&mut report, KeyCode::Esc);
+        assert_eq!(rx.recv().unwrap(), None);
+        assert!(report.cancelled);
+    }
 }

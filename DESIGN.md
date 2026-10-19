@@ -298,6 +298,9 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 - **Hide**: `v` toggles tickets under tasks, MRs, and worktrees with their
   agents out of the tree; the choice is kept in `tui.json` in the cache.
 - **Filter**: `/` over task names, tags, tickets and summaries, branches.
+- **Mouse**: the wheel scrolls the list or the details under it; a click
+  selects a row, a second click folds it. Shift-drag still selects text in
+  most terminals.
 - **Details** follow the selection: the note body for a task, the Jira
   description for a ticket, the MR, `git status` + unpushed and branch commits for
   a worktree, the agent's last screen for an agent — slow parts load in threads.

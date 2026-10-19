@@ -193,7 +193,7 @@ impl App {
         self.prompt = Some((prompt, text));
     }
 
-    fn toggle_fold(&mut self) {
+    pub(super) fn toggle_fold(&mut self) {
         let Some(row) = self.current() else { return };
         if !row.has_children && !self.folded.contains(&row.id) {
             return;
@@ -409,13 +409,13 @@ impl App {
             return;
         };
         let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-        ratatui::restore();
+        super::restore_terminal();
         let _ = Command::new("sh")
             .arg("-c")
             .arg(format!("{editor} \"$0\""))
             .arg(&path)
             .status();
-        *terminal = ratatui::init();
+        *terminal = super::init_terminal();
         self.refresh();
     }
 

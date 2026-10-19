@@ -20,7 +20,12 @@ use crate::vault::{self, note::NoteError};
 use details::Detail;
 use dialog::{Action, Dialog};
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 use rows::{Kind, Row};
 use std::collections::{HashMap, HashSet};
@@ -38,10 +43,22 @@ const PREVIEW_MIN_WIDTH: u16 = 110;
 
 pub fn run(config: Config) -> Result<(), String> {
     let mut app = App::new(config)?;
-    let mut terminal = ratatui::init();
+    let mut terminal = init_terminal();
     let result = app.run(&mut terminal);
-    ratatui::restore();
+    restore_terminal();
     result
+}
+
+/// The full-screen terminal, with the mouse reported to the TUI.
+fn init_terminal() -> DefaultTerminal {
+    let terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    terminal
+}
+
+fn restore_terminal() {
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    ratatui::restore();
 }
 
 enum Prompt {
@@ -112,6 +129,9 @@ struct App {
     popup: bool,
     agents_polled: Instant,
     agents_polling: bool,
+    /// Where the last frame drew the list and the details: mouse targets.
+    list_area: Rect,
+    details_area: Rect,
     /// Panes whose unnamed agent was given a name: asked once while unnamed.
     named: HashSet<String>,
 }
@@ -153,6 +173,8 @@ impl App {
             popup: std::env::var_os("WT_POPUP").is_some(),
             agents_polled: Instant::now(),
             agents_polling: false,
+            list_area: Rect::default(),
+            details_area: Rect::default(),
             named: HashSet::new(),
         };
         app.rebuild();
@@ -172,11 +194,14 @@ impl App {
             } else {
                 Duration::from_millis(200)
             };
-            if event::poll(wait).map_err(|e| e.to_string())?
-                && let Event::Key(key) = event::read().map_err(|e| e.to_string())?
-                && key.kind == KeyEventKind::Press
-            {
-                self.on_key(key, terminal);
+            if event::poll(wait).map_err(|e| e.to_string())? {
+                match event::read().map_err(|e| e.to_string())? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        self.on_key(key, terminal)
+                    }
+                    Event::Mouse(mouse) => self.on_mouse(mouse),
+                    _ => {}
+                }
             }
             while let Ok(update) = self.rx.try_recv() {
                 self.apply(update);
@@ -348,6 +373,43 @@ impl App {
     }
 
     /// Moves by `delta` rows, stepping over section titles.
+    /// The wheel scrolls the list or the details under it; a click selects a
+    /// row, a click on the selected one folds or unfolds it. Not while a dialog,
+    /// the help or a prompt is up.
+    fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.dialog.is_some() || self.help || self.prompt.is_some() {
+            return;
+        }
+        let at = Position::new(mouse.column, mouse.row);
+        let in_details = self.preview_shown && self.details_area.contains(at);
+        match mouse.kind {
+            MouseEventKind::ScrollDown if in_details => {
+                self.detail_scroll = self.detail_scroll.saturating_add(3)
+            }
+            MouseEventKind::ScrollUp if in_details => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(3)
+            }
+            MouseEventKind::ScrollDown if self.list_area.contains(at) => self.step(1),
+            MouseEventKind::ScrollUp if self.list_area.contains(at) => self.step(-1),
+            MouseEventKind::Down(MouseButton::Left) if self.list_area.contains(at) => {
+                // inside the border, below the title
+                let Some(line) = mouse.row.checked_sub(self.list_area.y + 1) else {
+                    return;
+                };
+                let index = self.list.offset() + line as usize;
+                if index >= self.rows.len() || self.rows[index].kind.is_header() {
+                    return;
+                }
+                if self.list.selected() == Some(index) {
+                    self.toggle_fold();
+                } else {
+                    self.select(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn step(&mut self, delta: isize) {
         let mut index = self.list.selected().unwrap_or(0) as isize;
         loop {

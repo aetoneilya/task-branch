@@ -92,6 +92,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             );
         frame.render_stateful_widget(list, left, &mut self.list);
+        (self.list_area, self.details_area) = (left, right);
 
         let details = Paragraph::new(self.details_lines())
             .block(Block::bordered().border_style(Style::default().fg(Color::DarkGray)))
@@ -310,6 +311,7 @@ impl App {
             "R          review worktree (wt review)  d  worktree: remove it; task: close it with its Jira tickets",
             "/          filter, Esc clears           .  all / active only      r  refresh",
             "v          show / hide tickets, MRs, worktrees with agents",
+            "mouse      wheel scrolls the list or the details, click selects, again folds",
             "w          next agent waiting for you (blocked, or done and unseen)",
             "p          show / hide details (hidden by default under 110 columns)",
             "ctrl-d/u   scroll details               ctrl-l  redraw            q  quit",

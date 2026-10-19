@@ -110,6 +110,10 @@ pub fn close_tab(tab_id: &str) -> Result<()> {
     run_herdr(&["tab", "close", tab_id]).map(|_| ())
 }
 
+pub fn close_pane(pane_id: &str) -> Result<()> {
+    run_herdr(&["pane", "close", pane_id]).map(|_| ())
+}
+
 /// Splits `pane` without moving focus and returns the new pane id.
 pub fn split_pane(pane: &str, direction: &str, cwd: &Path) -> Result<String> {
     let cwd = cwd.to_string_lossy();

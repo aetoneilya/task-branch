@@ -258,7 +258,8 @@ wt done [<task | worktree>] [--merged] [--force] [-y]
                     while anything is open (uncommitted, open MR, unpushed),
                     closes my open tickets of it in Jira (a done-category
                     transition like Closed, never Cancelled; others' tickets are
-                    left open), writes done: true, closed, mrs, branches.
+                    left open), closes the panes of its agents outside the
+                    worktrees, writes done: true, closed, mrs, branches.
                     --merged: sweep all finished worktrees
 wt attach <KEY> [<task>]   put a ticket into a task, no worktree or agent
 wt note "<text>"    (agents) append to the task's `## Agent notes`

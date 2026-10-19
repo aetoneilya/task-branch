@@ -57,7 +57,8 @@ wt note "<text>"           (for agents) append a finding to the note's "Agent no
 wt status                  the table in plain text; updates `state` and `sessions` in notes
 wt review [<worktree>]     start a reviewer agent next to the worktree's agent
 wt done [<task|worktree>] [--merged] [--force] [-y]
-                           close a task (worktrees, my Jira tickets, note marked done),
+                           close a task (worktrees, agents' panes, my Jira tickets,
+                           note marked done),
                            or remove one worktree; --merged removes every finished one
 wt completions <shell>     shell completion script
 ```

@@ -8,6 +8,7 @@ use super::launch::close_herdr_views;
 use crate::cli::DoneArgs;
 use crate::cli::load;
 use crate::client::gitlab::{MergeRequest, MrState};
+use crate::client::herdr;
 use crate::client::jira::{JiraClient, Transition};
 use crate::client::worktree;
 use crate::config::Config;
@@ -71,6 +72,11 @@ impl TaskPlan {
             .iter()
             .map(|&t| format!("remove worktree {}", self.table.tree(t).wt.name()))
             .collect();
+        steps.extend(
+            row.agents
+                .iter()
+                .map(|a| format!("close the pane of agent {}", a.name)),
+        );
         steps.extend(self.to_close.iter().map(|k| format!("close {k} in Jira")));
         steps.extend(
             self.left_open
@@ -220,10 +226,27 @@ pub(crate) fn finish_task(
     for &t in &row.trees {
         close_herdr_views(&table.tree(t).wt.path, &mut |e| problems.push(e));
     }
+    close_agent_panes(row, &mut |e| problems.push(e));
     if problems.is_empty() {
         Ok(())
     } else {
         Err(format!("done, but:\n  {}", problems.join("\n  ")))
+    }
+}
+
+/// Closes the panes of the task's agents outside its worktrees; the pane wt
+/// itself runs in goes last.
+fn close_agent_panes(row: &table::TaskRow, say: &mut dyn FnMut(String)) {
+    if row.agents.is_empty() || !herdr::available() {
+        return;
+    }
+    let own = std::env::var("HERDR_PANE_ID").ok();
+    let mut panes: Vec<&str> = row.agents.iter().map(|a| a.pane.as_str()).collect();
+    panes.sort_by_key(|p| own.as_deref() == Some(*p));
+    for pane in panes {
+        if let Err(e) = herdr::close_pane(pane) {
+            say(format!("can't close pane {pane}: {e}"));
+        }
     }
 }
 
@@ -499,9 +522,34 @@ pub(crate) fn attach(
 
 #[cfg(test)]
 mod tests {
-    use super::{closing_transition, nothing_to_lose, tree_blockers};
+    use super::{TaskPlan, closing_transition, nothing_to_lose, tree_blockers};
     use crate::client::jira::Transition;
-    use crate::table::fixtures::{mr, table, tree};
+    use crate::table::fixtures::{mr, table, task, tree};
+    use crate::table::{Agent, AgentStatus};
+
+    #[test]
+    fn closing_a_task_closes_the_panes_of_its_agents() {
+        let mut table = table(vec![task("video", &[])], vec![], vec![], vec![]);
+        table.tasks[0].agents.push(Agent {
+            name: "research".into(),
+            pane: "w1:p2".into(),
+            tab: "w1:t1".into(),
+            status: AgentStatus::Idle,
+            workspace: "w1".into(),
+            active: None,
+        });
+        let plan = TaskPlan {
+            table,
+            row: 0,
+            blockers: vec![],
+            to_close: vec![],
+            left_open: vec![],
+        };
+        assert!(
+            plan.steps()
+                .contains(&"close the pane of agent research".to_string())
+        );
+    }
 
     #[test]
     fn unknown_unpushed_commits_hold_a_worktree() {

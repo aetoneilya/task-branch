@@ -179,6 +179,9 @@ impl App {
         if let Some(detail) = self.detail(&row.kind) {
             lines.push(Line::from(""));
             match self.details.get(&detail) {
+                Some(text) if matches!(detail, Detail::Description(_)) => {
+                    lines.extend(description_lines(text))
+                }
                 Some(text) => lines.extend(text.lines().map(|l| Line::from(clean(l)))),
                 None => lines.push(Line::from(dim(format!(
                     "{} loading",
@@ -256,6 +259,62 @@ fn jira_text(markup: &str) -> String {
     out.join("\n")
 }
 
+/// A description as `jira_text` leaves it, drawn: headings bold, bullets and
+/// code colored, `monospace` and *bold* inline, link targets dim.
+fn description_lines(text: &str) -> Vec<Line<'static>> {
+    use ratatui::style::{Color, Modifier, Style};
+    use regex::Regex;
+    use std::sync::LazyLock;
+    static INLINE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"`([^`]+)`|\*([^*\s][^*]*)\*|( \(https?://[^)\s]+\))").unwrap()
+    });
+    let inline = |line: &str, base: Style| -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        let mut at = 0;
+        for c in INLINE.captures_iter(line) {
+            let whole = c.get(0).unwrap();
+            spans.push(Span::styled(line[at..whole.start()].to_string(), base));
+            let (text, style) = if let Some(code) = c.get(1) {
+                (code.as_str(), base.fg(Color::Yellow))
+            } else if let Some(bold) = c.get(2) {
+                (bold.as_str(), base.add_modifier(Modifier::BOLD))
+            } else {
+                (whole.as_str(), Style::default().fg(Color::DarkGray))
+            };
+            spans.push(Span::styled(text.to_string(), style));
+            at = whole.end();
+        }
+        spans.push(Span::styled(line[at..].to_string(), base));
+        spans
+    };
+    let mut lines = Vec::new();
+    let mut in_block = false;
+    for line in text.lines().map(clean) {
+        if line.starts_with("────") {
+            in_block = !in_block && line == "────";
+            lines.push(Line::from(dim(line)));
+        } else if in_block {
+            lines.push(Line::styled(line, Style::default().fg(Color::Yellow)));
+        } else if let Some(rest) = line.strip_prefix('#') {
+            let heading = rest.trim_start_matches('#').trim();
+            let style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            lines.push(Line::from(inline(heading, style)));
+        } else if let Some(at) = line.find("• ").filter(|&i| line[..i].trim().is_empty()) {
+            let mut spans = vec![
+                Span::raw(line[..at].to_string()),
+                Span::styled("• ", Style::default().fg(Color::Cyan)),
+            ];
+            spans.extend(inline(&line[at + "• ".len()..], Style::default()));
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(inline(&line, Style::default())));
+        }
+    }
+    lines
+}
+
 fn display_path(path: &Path) -> String {
     let path = path.to_string_lossy();
     match dirs::home_dir() {
@@ -308,7 +367,8 @@ fn git_detail(path: &Path, branch: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::jira_text;
+    use super::{description_lines, jira_text};
+    use ratatui::style::{Color, Modifier};
 
     #[test]
     fn jira_markup_reads_as_text() {
@@ -317,5 +377,30 @@ mod tests {
             jira_text(markup),
             "## Цель\n• пункт с `code`\n  • вложенный ссылка (https://x.y)\n────\n  int a;\n────\n[image shot.png]"
         );
+    }
+
+    #[test]
+    fn descriptions_draw_headings_bullets_and_code() {
+        let text = jira_text("h2. Цель\n* пункт с {{code}} и *важно*\n{code}\nint a;\n{code}");
+        let lines = description_lines(&text);
+        let line = |i: usize| {
+            lines[i]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        assert_eq!(line(0), "Цель");
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(line(1), "• пункт с code и важно");
+        let code = lines[1].spans.iter().find(|s| s.content == "code").unwrap();
+        assert_eq!(code.style.fg, Some(Color::Yellow));
+        let bold = lines[1]
+            .spans
+            .iter()
+            .find(|s| s.content == "важно")
+            .unwrap();
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(lines[3].style.fg, Some(Color::Yellow));
     }
 }

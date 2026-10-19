@@ -136,6 +136,8 @@ pub struct Agent {
     pub status: AgentStatus,
     /// The herdr workspace it runs in.
     pub workspace: String,
+    /// Unix time its claude session last wrote to the transcript.
+    pub active: Option<u64>,
 }
 
 impl Agent {
@@ -144,13 +146,18 @@ impl Agent {
         self.name != self.pane
     }
 
-    fn from_herdr(agent: &herdr::Agent) -> Agent {
+    fn from_herdr(agent: &herdr::Agent, sessions: &HashMap<String, sessions::Session>) -> Agent {
         Agent {
             name: agent.name.clone().unwrap_or_else(|| agent.pane_id.clone()),
             pane: agent.pane_id.clone(),
             tab: agent.tab_id.clone(),
             status: AgentStatus::parse(&agent.agent_status),
             workspace: agent.workspace_id.clone(),
+            active: agent
+                .session_id()
+                .and_then(|id| sessions.get(id))
+                .map(|s| s.modified)
+                .filter(|&m| m > 0),
         }
     }
 }
@@ -354,7 +361,8 @@ impl Table {
             tree.agents = matching::agents_in(&tree.wt.path, agents, &self.sessions);
         }
         for row in &mut self.tasks {
-            row.agents = matching::agents_outside(row.space.as_deref(), agents, &self.trees);
+            row.agents =
+                matching::agents_outside(row.space.as_deref(), agents, &self.trees, &self.sessions);
         }
     }
 

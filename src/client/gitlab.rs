@@ -208,6 +208,8 @@ pub struct MergeRequest {
     pub draft: bool,
     #[serde(default)]
     pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 impl MergeRequest {

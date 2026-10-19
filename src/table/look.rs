@@ -224,6 +224,24 @@ pub fn pipeline(review: &MrReview) -> Option<Piece> {
     })
 }
 
+/// How long ago unix time `then` was, shortly: `now`, `5m`, `2h`, `3d`.
+pub fn ago(then: i64) -> String {
+    let secs = (chrono::Utc::now().timestamp() - then).max(0);
+    match secs {
+        0..60 => "now".to_string(),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86_400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
+/// Unix time of an RFC 3339 stamp.
+pub fn unix(stamp: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(stamp)
+        .ok()
+        .map(|t| t.timestamp())
+}
+
 /// `width` cells filled up to `done` (0..=1).
 pub fn bar(done: f64, width: usize) -> String {
     let filled = ((done.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);

@@ -51,6 +51,53 @@ struct Rows<'a> {
 }
 
 impl Rows<'_> {
+    /// What a folded row hides: `▸ 2 tasks · 3 wt · 4 MR · 1 working`.
+    fn folded_summary(&self, node: &Node) -> Vec<Span<'static>> {
+        fn count(table: &Table, node: &Node, n: &mut [usize; 5]) {
+            for child in &node.children {
+                match child.kind {
+                    Kind::Task(_) => n[0] += 1,
+                    Kind::Tree(_) => n[1] += 1,
+                    Kind::Mr(_) => n[2] += 1,
+                    Kind::Agent(at, a) => match table.agent(at, a).status {
+                        AgentStatus::Working => n[3] += 1,
+                        status if status.waiting() => n[4] += 1,
+                        _ => {}
+                    },
+                    _ => {}
+                }
+                count(table, child, n);
+            }
+        }
+        let mut n = [0; 5];
+        count(self.table, node, &mut n);
+        let parts: Vec<String> = [(n[0], "task"), (n[1], "wt"), (n[2], "MR")]
+            .into_iter()
+            .filter(|(k, _)| *k > 0)
+            .map(|(k, what)| match (what, k) {
+                ("task", k) if k > 1 => format!("{k} tasks"),
+                (what, k) => format!("{k} {what}"),
+            })
+            .collect();
+        let mut spans = vec![dim(format!("  ▸ {}", parts.join(" · ")))];
+        if parts.is_empty() {
+            spans = vec![dim(format!("  ▸ {}", node.children.len()))];
+        }
+        if n[3] > 0 {
+            spans.push(Span::styled(
+                format!(" · {} working", n[3]),
+                style(Tone::Green),
+            ));
+        }
+        if n[4] > 0 {
+            spans.push(Span::styled(
+                format!(" · {} waiting", n[4]),
+                style(Tone::Red),
+            ));
+        }
+        spans
+    }
+
     /// The node's row under `parent`, drawn after `indent` and `glyph`, then
     /// its children unless folded.
     fn add(&mut self, node: &Node, parent: Option<usize>, root: &Kind, glyph: &str, indent: &str) {
@@ -78,7 +125,7 @@ impl Rows<'_> {
         let mut spans = vec![dim(format!("{indent}{glyph}"))];
         spans.extend(label(self.table, &node.kind));
         if is_folded && !node.children.is_empty() {
-            spans.push(dim(format!("  ▸ {}", node.children.len())));
+            spans.extend(self.folded_summary(node));
         }
         let index = self.rows.len();
         self.rows.push(Row {
@@ -136,19 +183,33 @@ pub fn dim(text: impl Into<String>) -> Span<'static> {
 }
 
 /// `◉ name status`, the name in `tone`.
-/// The status is the last span: `agent_status_span`.
+/// The status is the last span: `agent_status_span`. An agent idle for a day
+/// or more fades.
 pub fn agent_spans(agent: &Agent, tone: Tone) -> Vec<Span<'static>> {
+    let stale = idle_since(agent).is_some_and(|t| chrono::Utc::now().timestamp() - t >= 86_400);
+    let tone = if stale { Tone::Dim } else { tone };
     vec![
         Piece::new(format!("{} {}", look::AGENT, agent.name), tone).into(),
-        agent_status_span(agent.status),
+        agent_status_span(agent),
     ]
 }
 
-/// ` status`, with a spinner while the agent works.
-pub fn agent_status_span(status: AgentStatus) -> Span<'static> {
-    let mut piece = look::agent_status(status);
-    if status == AgentStatus::Working {
+/// When an agent that is not working last did something.
+fn idle_since(agent: &Agent) -> Option<i64> {
+    agent
+        .active
+        .filter(|_| agent.status != AgentStatus::Working)
+        .map(|t| t as i64)
+}
+
+/// ` ⠹ working` with a moving spinner, or ` idle 2h` with how long ago the
+/// agent last did something.
+pub fn agent_status_span(agent: &Agent) -> Span<'static> {
+    let mut piece = look::agent_status(agent.status);
+    if agent.status == AgentStatus::Working {
         piece.text = format!("{} {}", super::anim::spinner(), piece.text);
+    } else if let Some(t) = idle_since(agent) {
+        piece.text = format!("{} {}", piece.text, look::ago(t));
     }
     piece.after(" ").into()
 }
@@ -190,6 +251,9 @@ fn label(table: &Table, kind: &Kind) -> Vec<Span<'static>> {
             let mut pieces = vec![look::mr_iid(mr, false), look::mr_state(mr).after(" ")];
             pieces.extend(look::review(mr));
             pieces.push(Piece::dim(format!(" {}", look::mr_title(mr))));
+            if let Some(t) = mr.mr.updated_at.as_deref().and_then(look::unix) {
+                pieces.push(Piece::dim(format!(" · {}", look::ago(t))));
+            }
             pieces
         }
         Kind::Tree(t) => {

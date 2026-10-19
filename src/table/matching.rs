@@ -108,7 +108,7 @@ pub fn assemble(inputs: Inputs) -> Table {
     }
 
     for row in &mut rows {
-        row.agents = agents_outside(row.space.as_deref(), &agents, &trees);
+        row.agents = agents_outside(row.space.as_deref(), &agents, &trees, &sessions);
     }
     for row in rows.iter_mut().filter(|r| !r.task.done) {
         row.new_sessions = discover_sessions(row, &trees, &roots, &sessions);
@@ -391,7 +391,7 @@ pub(super) fn agents_in(
                 None => a.runs_in(dir),
             }
         })
-        .map(Agent::from_herdr)
+        .map(|a| Agent::from_herdr(a, sessions))
         .collect()
 }
 
@@ -431,6 +431,7 @@ pub(super) fn agents_outside(
     space: Option<&str>,
     agents: &[herdr::Agent],
     trees: &[Tree],
+    sessions: &HashMap<String, Session>,
 ) -> Vec<Agent> {
     let Some(space) = space else {
         return Vec::new();
@@ -444,7 +445,7 @@ pub(super) fn agents_outside(
                 .flat_map(|t| &t.agents)
                 .any(|t| t.pane == a.pane_id)
         })
-        .map(Agent::from_herdr)
+        .map(|a| Agent::from_herdr(a, sessions))
         .collect()
 }
 

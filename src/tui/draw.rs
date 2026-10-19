@@ -71,7 +71,7 @@ impl App {
                 if let Kind::Agent(at, a) = r.kind
                     && let Some(last) = line.spans.last_mut()
                 {
-                    *last = rows::agent_status_span(self.table.agent(at, a).status);
+                    *last = rows::agent_status_span(self.table.agent(at, a));
                 }
                 ListItem::new(line)
             })

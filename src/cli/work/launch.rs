@@ -198,23 +198,12 @@ fn open_tab(space: &str, cwd: &Path, label: &str) -> Result<(String, String), St
 }
 
 fn free_agent_name(base: &str) -> String {
-    let base = herdr::agent_name(base);
     let taken: Vec<String> = herdr::list_agents()
         .unwrap_or_default()
         .into_iter()
         .filter_map(|a| a.name)
         .collect();
-    if !taken.contains(&base) {
-        return base;
-    }
-    (2..)
-        .map(|n| {
-            let suffix = format!("-{n}");
-            let head: String = base.chars().take(32 - suffix.len()).collect();
-            format!("{head}{suffix}")
-        })
-        .find(|candidate| !taken.contains(candidate))
-        .unwrap_or(base)
+    herdr::free_agent_name(base, &taken)
 }
 
 /// herdr's agents; none outside herdr.

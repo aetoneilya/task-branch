@@ -496,6 +496,44 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_agents_get_the_name_of_their_worktree_or_task() {
+        let mut inputs = inputs(
+            vec![task("video search", &[]), task("Анализ", &["UCP-7"])],
+            vec![],
+            vec![],
+            vec![tree("a2i-config", "i.udalov/UCP-1-config")],
+        );
+        inputs.workspaces = vec![workspace("w1", "video search"), workspace("w2", "Анализ")];
+        let unnamed = |tree: &str, space: &str, pane: &str| herdr::Agent {
+            name: None,
+            pane_id: format!("{space}:{pane}"),
+            ..agent(pane, tree, space)
+        };
+        inputs.agents = vec![
+            agent("a2i-config", "a2i-config", "w9"),
+            unnamed("a2i-config", "w9", "p2"),
+            unnamed("main", "w1", "p1"),
+            unnamed("main", "w2", "p1"),
+        ];
+        let table = assemble(inputs);
+        let tabs = |labels: &[(&str, &str)]| {
+            labels
+                .iter()
+                .map(|(t, l)| (t.to_string(), l.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            table.agent_names(&tabs(&[("w9:t", "a2i review"), ("w1:t", "1")])),
+            vec![
+                ("w9:p2".to_string(), "a2i-review".to_string()),
+                ("w1:p1".to_string(), "video-search".to_string()),
+                ("w2:p1".to_string(), "ucp-7".to_string()),
+            ]
+        );
+        assert_eq!(table.agent_names(&tabs(&[]))[0].1, "a2i-config-2");
+    }
+
+    #[test]
     fn mr_joins_by_key_or_by_the_branch_of_a_task_worktree() {
         let table = table(
             vec![task("a2i", &["UCP-1"])],

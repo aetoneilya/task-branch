@@ -59,7 +59,8 @@ enum Update {
     Table(Box<Table>, Vec<String>),
     /// A lazily loaded detail.
     Detail(Detail, String),
-    Agents(Vec<herdr::Agent>),
+    /// herdr's agents and tabs.
+    Agents(Vec<herdr::Agent>, Vec<herdr::Tab>),
     /// A dialog's action checked, or why it can't be.
     Plan(Result<Action, String>),
     /// A line of a running command's report.
@@ -111,6 +112,8 @@ struct App {
     popup: bool,
     agents_polled: Instant,
     agents_polling: bool,
+    /// Panes whose unnamed agent was given a name: asked once while unnamed.
+    named: HashSet<String>,
 }
 
 impl App {
@@ -150,6 +153,7 @@ impl App {
             popup: std::env::var_os("WT_POPUP").is_some(),
             agents_polled: Instant::now(),
             agents_polling: false,
+            named: HashSet::new(),
         };
         app.rebuild();
         if let Some(warning) = app.table.warnings.first() {
@@ -229,12 +233,37 @@ impl App {
         self.agents_polling = true;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(Update::Agents(herdr::list_agents().unwrap_or_default()));
+            let agents = herdr::list_agents().unwrap_or_default();
+            let tabs = herdr::list_tabs().unwrap_or_default();
+            let _ = tx.send(Update::Agents(agents, tabs));
         });
     }
 
+    /// Names the agents herdr knows by pane id only, so herdr and the tree show
+    /// what they work on; the next poll brings the names in.
+    fn name_agents(&mut self, tabs: &HashMap<String, String>) {
+        if !herdr::available() {
+            return;
+        }
+        let names = self.table.agent_names(tabs);
+        // named since: should it lose the name again, it gets one again
+        self.named
+            .retain(|pane| names.iter().any(|(p, _)| p == pane));
+        let names: Vec<(String, String)> = names
+            .into_iter()
+            .filter(|(pane, _)| self.named.insert(pane.clone()))
+            .collect();
+        if !names.is_empty() {
+            std::thread::spawn(move || {
+                for (pane, name) in names {
+                    let _ = herdr::rename_agent(&pane, &name);
+                }
+            });
+        }
+    }
+
     /// Agent rows whose agent waits for me: asking (blocked) or finished unseen
-    /// (done). With agents hidden, their worktrees' rows.
+    /// (done).
     fn waiting(&self) -> Vec<usize> {
         self.rows
             .iter()
@@ -285,7 +314,7 @@ impl App {
                 reply,
             } => self.on_ask(prompt, items, reply),
             Update::Finished(result) => self.on_finished(result),
-            Update::Agents(agents) => {
+            Update::Agents(agents, tabs) => {
                 self.agents_polling = false;
                 self.agents_polled = Instant::now();
                 self.table.update_agents(&agents);
@@ -296,6 +325,8 @@ impl App {
                     .filter(|d| matches!(d, Detail::Screen(_)));
                 self.stale.extend(screens.cloned());
                 self.rebuild();
+                let tabs = tabs.into_iter().map(|t| (t.tab_id, t.label)).collect();
+                self.name_agents(&tabs);
             }
         }
     }

@@ -132,16 +132,23 @@ pub struct Agent {
     /// Its herdr name, or the pane id when it has none.
     pub name: String,
     pub pane: String,
+    pub tab: String,
     pub status: AgentStatus,
     /// The herdr workspace it runs in.
     pub workspace: String,
 }
 
 impl Agent {
+    /// It has a herdr name: herdr drops it when the agent restarts.
+    pub fn named(&self) -> bool {
+        self.name != self.pane
+    }
+
     fn from_herdr(agent: &herdr::Agent) -> Agent {
         Agent {
             name: agent.name.clone().unwrap_or_else(|| agent.pane_id.clone()),
             pane: agent.pane_id.clone(),
+            tab: agent.tab_id.clone(),
             status: AgentStatus::parse(&agent.agent_status),
             workspace: agent.workspace_id.clone(),
         }
@@ -347,6 +354,52 @@ impl Table {
         for row in &mut self.tasks {
             row.agents = matching::agents_outside(row.space.as_deref(), agents, &self.trees);
         }
+    }
+
+    /// Names for agents herdr knows by pane id only, as `(pane, name)`: after
+    /// the label of their herdr tab, as herdr shows them; a tab herdr labelled
+    /// by itself (a number, a repository's directory) gives way to the
+    /// worktree's name, or the task's, else its first ticket.
+    pub fn agent_names(&self, tabs: &HashMap<String, String>) -> Vec<(String, String)> {
+        let repos: Vec<String> = self
+            .trees
+            .iter()
+            .filter_map(|t| t.repo.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .collect();
+        let label = |agent: &Agent| {
+            tabs.get(&agent.tab)
+                .filter(|l| !l.chars().all(|c| c.is_ascii_digit()) && !repos.contains(l))
+        };
+        let unnamed = self
+            .trees
+            .iter()
+            .flat_map(|t| t.agents.iter().map(move |a| (a, t.wt.name())))
+            .chain(self.tasks.iter().flat_map(|row| {
+                let base = match herdr::agent_name(&row.task.name).as_str() {
+                    "agent" => row.tickets().next().cloned().unwrap_or_default(),
+                    _ => row.task.name.clone(),
+                };
+                row.agents.iter().map(move |a| (a, base.clone()))
+            }));
+        let mut taken: Vec<String> = self
+            .trees
+            .iter()
+            .flat_map(|t| &t.agents)
+            .chain(self.tasks.iter().flat_map(|r| &r.agents))
+            .filter(|a| a.named())
+            .map(|a| a.name.clone())
+            .collect();
+        let mut names = Vec::new();
+        for (agent, base) in unnamed {
+            if agent.named() || names.iter().any(|(p, _)| p == &agent.pane) {
+                continue;
+            }
+            let name = herdr::free_agent_name(label(agent).unwrap_or(&base), &taken);
+            taken.push(name.clone());
+            names.push((agent.pane.clone(), name));
+        }
+        names
     }
 
     /// The agent an agent row shows.

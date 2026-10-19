@@ -52,6 +52,7 @@ task  (note: shared context; any size — a "project" is just a big task)
 | ticket | branch | `\b<KEY>\b` in a local or remote branch name |
 | branch | worktree | `git worktree list --porcelain` |
 | worktree | agent | herdr `agent list`: the last `cwd` in the agent's claude transcript (agents started in the main checkout move into worktrees), else the pane cwd |
+| agent | name | the TUI names an agent herdr knows by pane id only (herdr drops names when an agent restarts): after its tab's label, else the worktree's or task's name |
 | worktree | task | an agent working in it runs in the task's herdr workspace (label == task name) |
 | MR | MR (no key) | worktree's branch == MR source branch (MRs without a key still land in their worktree's task) |
 

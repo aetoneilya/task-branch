@@ -84,6 +84,16 @@ pub struct WorkspaceWorktree {
     pub checkout_path: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Tab {
+    pub tab_id: String,
+    pub label: String,
+}
+
+pub fn list_tabs() -> Result<Vec<Tab>> {
+    result_field(run_herdr(&["tab", "list"])?, "/result/tabs")
+}
+
 pub fn list_agents() -> Result<Vec<Agent>> {
     result_field(run_herdr(&["agent", "list"])?, "/result/agents")
 }
@@ -240,21 +250,65 @@ pub fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
-/// Herdr agent names must match [a-z][a-z0-9_-]{0,31}.
+/// Herdr agent names must match [a-z][a-z0-9_-]{0,31}: other characters
+/// become one `-` per run, none at the ends; `agent` when nothing is left.
 pub fn agent_name(raw: &str) -> String {
-    let mut name: String = raw
-        .to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
-        name = format!("wt-{name}");
+    let mut name = String::new();
+    for c in raw.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            name.push(c);
+        } else if !name.is_empty() && !name.ends_with('-') {
+            name.push('-');
+        }
     }
-    name.chars().take(32).collect()
+    let name = name.trim_end_matches('-');
+    let name = if name.is_empty() {
+        "agent".to_string()
+    } else if !name.starts_with(|c: char| c.is_ascii_lowercase()) {
+        format!("wt-{name}")
+    } else {
+        name.to_string()
+    };
+    name.chars()
+        .take(32)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_string()
+}
+
+/// `agent_name(base)`, with `-2`, `-3`, … when one of `taken` has it.
+pub fn free_agent_name(base: &str, taken: &[String]) -> String {
+    let base = agent_name(base);
+    if !taken.contains(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| {
+            let suffix = format!("-{n}");
+            let head: String = base.chars().take(32 - suffix.len()).collect();
+            format!("{head}{suffix}")
+        })
+        .find(|candidate| !taken.contains(candidate))
+        .unwrap_or(base)
+}
+
+pub fn rename_agent(target: &str, name: &str) -> Result<()> {
+    run_herdr(&["agent", "rename", target, name]).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_names_keep_what_herdr_takes() {
+        assert_eq!(agent_name("a2i-config-folder"), "a2i-config-folder");
+        assert_eq!(agent_name("javadoc-и ко всем точкам"), "javadoc");
+        assert_eq!(agent_name("Схлопнуть d2d и hnsw"), "d2d-hnsw");
+        assert_eq!(agent_name("единый образ"), "agent");
+        assert_eq!(agent_name("2fa"), "wt-2fa");
+        assert_eq!(agent_name(&"x-".repeat(40)).len(), 31);
+        let taken = vec!["video".to_string(), "video-2".to_string()];
+        assert_eq!(free_agent_name("video", &taken), "video-3");
+    }
 }

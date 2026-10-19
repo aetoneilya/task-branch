@@ -6,7 +6,7 @@ use super::{Fresh, Mr, Source, Ticket, Tree};
 use crate::client::gitlab::{GitLab, MrReview};
 use crate::client::jira::{JiraClient, JiraIssue};
 use crate::client::worktree::{self, Worktree};
-use crate::client::{herdr, joined, sessions};
+use crate::client::{herdr, joined, parallel, sessions};
 use crate::config::Config;
 use crate::trace;
 use crate::vault::task::{Task, ticket_keys};
@@ -15,6 +15,11 @@ use std::path::{Path, PathBuf};
 
 /// Merged and closed MRs older than this are not fetched.
 const MR_LOOKBACK_DAYS: i64 = 90;
+/// Requests to GitLab or Jira at once: enough to hide latency (a page of open
+/// MRs in one round), few enough not to flood them.
+const REQUESTS: usize = 16;
+/// git runs at once in big worktrees: the disk is the limit.
+const GIT_RUNS: usize = 8;
 
 /// Tickets by key, or why Jira did not give them.
 type Tickets = Result<HashMap<String, Ticket>, String>;
@@ -269,16 +274,12 @@ fn fetch_tickets_by_key(jira: &JiraClient, keys: &[String]) -> Tickets {
             // one unknown key fails the whole query: fall back to one request per
             // key, all at once — but not when Jira is down, that would wait out
             // every key
-            Err(err) if err.bad_request() => std::thread::scope(|scope| {
-                let handles: Vec<_> = chunk
-                    .iter()
-                    .map(|key| scope.spawn(move || existing(jira.get_issue_by_key(key))))
-                    .collect();
-                handles
+            Err(err) if err.bad_request() => {
+                parallel(chunk, REQUESTS, |key| existing(jira.get_issue_by_key(key)))
                     .into_iter()
-                    .map(|h| joined(h, "a Jira request"))
-                    .collect::<Result<Vec<_>, _>>()
-            })?
+                    .map(|r| r.unwrap_or_else(|| Err("a Jira request panicked".to_string())))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
             .into_iter()
             .flatten()
             .collect(),
@@ -350,20 +351,15 @@ fn fetch_mrs(
             _ => Ok(HashMap::new()),
         });
         // review state of the open ones, all at once
-        let reviews: Vec<Option<MrReview>> = std::thread::scope(|inner| {
+        let reviews: Vec<Option<MrReview>> = {
             let _span = trace::span(format!("gitlab: review of {} open MRs", found.len()));
-            let handles: Vec<_> = found
-                .iter()
-                .map(|(project, m)| {
-                    let iid = m.mr.iid();
-                    inner.spawn(move || gitlab.mr_review(project, iid))
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().ok().and_then(Result::ok))
-                .collect()
-        });
+            parallel(&found, REQUESTS, |(project, m)| {
+                gitlab.mr_review(project, m.mr.iid()).ok()
+            })
+            .into_iter()
+            .map(Option::flatten)
+            .collect()
+        };
         for ((_, mr), review) in found.iter_mut().zip(reviews) {
             mr.review = review;
         }
@@ -394,20 +390,15 @@ fn collect_trees(config: &Config, with_status: bool) -> Vec<Tree> {
         }
     }
 
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = found
-            .into_iter()
-            .map(|(repo, project, wt)| {
-                scope.spawn(move || {
-                    let mut tree = inspect_tree(repo, wt, with_status);
-                    tree.project = Some(project.to_string());
-                    tree
-                })
-            })
-            .collect();
-        // a worktree whose inspection panicked is left out
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    // a worktree whose inspection panicked is left out
+    parallel(&found, GIT_RUNS, |(repo, project, wt)| {
+        let mut tree = inspect_tree(repo.clone(), wt.clone(), with_status);
+        tree.project = Some(project.to_string());
+        tree
     })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// `git status` is the slow part; offline callers skip it.

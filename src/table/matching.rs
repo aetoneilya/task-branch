@@ -587,7 +587,10 @@ mod tests {
             vec![other, same],
         );
         assert_eq!(table.tree(table.tree_index("other")).mr, None);
-        assert_eq!(table.tree(table.tree_index("same")).mr, Some(table.mr_index(10)));
+        assert_eq!(
+            table.tree(table.tree_index("same")).mr,
+            Some(table.mr_index(10))
+        );
     }
 
     #[test]

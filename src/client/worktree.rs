@@ -19,7 +19,7 @@ pub enum GitError {
 
 pub(crate) type Result<T> = std::result::Result<T, GitError>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Worktree {
     pub path: PathBuf,
     pub branch: Option<String>,

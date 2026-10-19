@@ -1,7 +1,7 @@
 //! `wt select`: back to existing work, focusing its agent or resuming its session.
 
 use super::brief::brief_path;
-use super::common::{Terminal, Ui, current_repo, err, find_task, is_ticket_key};
+use super::common::{Terminal, Ui, choose_repo, err, find_task, is_ticket_key, repo_with_worktree};
 use super::launch::{launch, open_agent};
 use crate::cli::SelectArgs;
 use crate::cli::load;
@@ -210,11 +210,10 @@ fn restore_worktree(
     name: &str,
     ui: &mut dyn Ui,
 ) -> Result<PathBuf, String> {
-    let main = current_repo(config)?;
-    let dir = worktree::worktree_dir(&main, name);
-    if dir.exists() {
-        return Ok(dir);
+    if let Some(main) = repo_with_worktree(config, name) {
+        return Ok(worktree::worktree_dir(&main, name));
     }
+    let main = choose_repo(config, ui)?;
     let keys: Vec<String> = row.map(|r| r.task.tickets.clone()).unwrap_or_default();
     let candidates: Vec<String> = worktree::all_branches(&main)
         .map_err(err)?

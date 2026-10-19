@@ -62,10 +62,13 @@ pub struct Mr {
     pub keys: Vec<String>,
     /// Pipeline, approvals and unresolved threads; open MRs only.
     pub review: Option<MrReview>,
+    /// The GitLab project it is in; empty in a cache from before it was kept.
+    #[serde(default)]
+    pub project: String,
 }
 
 impl Mr {
-    fn new(mr: MergeRequest) -> Mr {
+    fn new(mr: MergeRequest, project: &str) -> Mr {
         let mut keys = ticket_keys(mr.source_branch());
         for key in ticket_keys(mr.title()) {
             if !keys.contains(&key) {
@@ -76,6 +79,7 @@ impl Mr {
             mr,
             keys,
             review: None,
+            project: project.to_string(),
         }
     }
 
@@ -166,6 +170,9 @@ impl Agent {
 #[derive(Debug)]
 pub struct Tree {
     pub repo: PathBuf,
+    /// The repo's GitLab project, when the config names it: only MRs from there
+    /// are this worktree's.
+    pub project: Option<String>,
     pub wt: Worktree,
     pub keys: Vec<String>,
     pub changes: Option<usize>,

@@ -2,7 +2,7 @@
 
 use super::brief::brief_text;
 use super::common::{
-    Terminal, Ui, branch_name, current_repo, err, fetch_issue, find_task, is_ticket_key, list,
+    Terminal, Ui, branch_name, choose_repo, err, fetch_issue, find_task, is_ticket_key, list,
     name_from_issue, name_from_text, resolve_task,
 };
 use super::launch::open_work;
@@ -101,7 +101,7 @@ fn start_with(
             .ok_or("no latin worktree name comes out of the title — give one with -n")?,
     };
     let branch = branch.unwrap_or_else(|| branch_name(config, keys.first(), &wt_name));
-    let main = current_repo(config)?;
+    let main = choose_repo(config, ui)?;
 
     let vault = vault_config(config)?;
     let path = vault
@@ -180,7 +180,11 @@ fn add_with(
     }
 
     let issue = fetch_issue(config, &key)?;
-    let main = current_repo(config)?;
+    let main = match &in_tree {
+        Some(existing) => super::common::repo_with_worktree(config, existing)
+            .ok_or_else(|| format!("no worktree {existing}"))?,
+        None => choose_repo(config, ui)?,
+    };
     let (tree, branch, wt_name) = match in_tree {
         Some(existing) => {
             let dir = worktree::worktree_dir(&main, &existing);

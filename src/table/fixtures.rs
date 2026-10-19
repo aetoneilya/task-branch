@@ -66,13 +66,14 @@ pub fn mr(iid: u64, branch: &str, title: &str, state: &str) -> Mr {
         "sha": null,
     }))
     .unwrap();
-    Mr::new(mr)
+    Mr::new(mr, "ai/ucp")
 }
 
 /// A clean worktree `ROOT/<name>` on `branch`.
 pub fn tree(name: &str, branch: &str) -> Tree {
     Tree {
         repo: PathBuf::from("/r"),
+        project: None,
         wt: Worktree {
             path: PathBuf::from(ROOT).join(name),
             branch: Some(branch.to_string()),

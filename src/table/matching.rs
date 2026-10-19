@@ -56,6 +56,12 @@ pub fn assemble(inputs: Inputs) -> Table {
             .iter()
             .enumerate()
             .filter(|(_, m)| Some(m.mr.source_branch()) == branch)
+            // the same branch name in another repo is another branch
+            .filter(|(_, m)| {
+                tree.project
+                    .as_deref()
+                    .is_none_or(|p| m.project.is_empty() || m.project == p)
+            })
             .max_by_key(|(_, m)| (m.opened(), m.mr.iid()))
             .map(|(i, _)| i);
         // a branch named without a ticket key still carries one in its MR title
@@ -566,6 +572,22 @@ mod tests {
             ]
         );
         assert_eq!(table.agent_names(&tabs(&[]))[0].1, "a2i-config-2");
+    }
+
+    #[test]
+    fn a_worktree_takes_the_mr_of_its_own_repo_only() {
+        let mut other = tree("other", "i.udalov/UCP-1-x");
+        other.project = Some("ai/other".to_string());
+        let mut same = tree("same", "i.udalov/UCP-1-x");
+        same.project = Some("ai/ucp".to_string());
+        let table = table(
+            vec![],
+            vec![],
+            vec![mr(10, "i.udalov/UCP-1-x", "UCP-1 x", "opened")],
+            vec![other, same],
+        );
+        assert_eq!(table.tree(table.tree_index("other")).mr, None);
+        assert_eq!(table.tree(table.tree_index("same")).mr, Some(table.mr_index(10)));
     }
 
     #[test]

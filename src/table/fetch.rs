@@ -335,7 +335,7 @@ fn fetch_mrs(
             let listed = trace::time("gitlab: open MRs", || {
                 gitlab.my_open_merge_requests(project)
             })?;
-            found.extend(listed.into_iter().map(|mr| (project, Mr::new(mr))));
+            found.extend(listed.into_iter().map(|mr| (project, Mr::new(mr, project))));
         }
         let mut keys: Vec<String> = Vec::new();
         for key in found.iter().flat_map(|(_, m)| &m.keys) {
@@ -373,7 +373,7 @@ fn fetch_mrs(
                 .iter()
                 .any(|(p, m)| *p == project && m.mr.iid() == mr.iid())
             {
-                found.push((project, Mr::new(mr)));
+                found.push((project, Mr::new(mr, project)));
             }
         }
         let tickets = joined(tickets, "the fetch");
@@ -384,20 +384,26 @@ fn fetch_mrs(
 /// Linked worktrees of every configured repo; git status and the unpushed count
 /// take ~0.5s per worktree in a big repo, so they run in parallel.
 fn collect_trees(config: &Config, with_status: bool) -> Vec<Tree> {
-    let mut found: Vec<(PathBuf, Worktree)> = Vec::new();
+    let mut found: Vec<(PathBuf, &str, Worktree)> = Vec::new();
     for repo in &config.repos {
         let Ok(main) = worktree::main_checkout(&repo.path) else {
             continue;
         };
         for wt in worktree::linked_worktrees(&main).unwrap_or_default() {
-            found.push((main.clone(), wt));
+            found.push((main.clone(), &repo.gitlab_project, wt));
         }
     }
 
     std::thread::scope(|scope| {
         let handles: Vec<_> = found
             .into_iter()
-            .map(|(repo, wt)| scope.spawn(move || inspect_tree(repo, wt, with_status)))
+            .map(|(repo, project, wt)| {
+                scope.spawn(move || {
+                    let mut tree = inspect_tree(repo, wt, with_status);
+                    tree.project = Some(project.to_string());
+                    tree
+                })
+            })
             .collect();
         // a worktree whose inspection panicked is left out
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
@@ -427,6 +433,7 @@ fn inspect_tree(repo: PathBuf, wt: Worktree, with_status: bool) -> Tree {
         .flatten();
     Tree {
         repo,
+        project: None,
         wt,
         keys,
         changes,

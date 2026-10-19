@@ -108,8 +108,9 @@ pub(super) fn branch_name(config: &Config, key: Option<&String>, name: &str) -> 
     }
 }
 
-/// The main checkout of the configured repo the cwd is in, otherwise of the first.
-pub(super) fn current_repo(config: &Config) -> Result<PathBuf, String> {
+/// The main checkout new work goes into: the only configured repo, the one the
+/// cwd is in, else the one picked; the first when nobody can be asked.
+pub(super) fn choose_repo(config: &Config, ui: &mut dyn Ui) -> Result<PathBuf, String> {
     let mains: Vec<PathBuf> = config
         .repos
         .iter()
@@ -118,13 +119,28 @@ pub(super) fn current_repo(config: &Config) -> Result<PathBuf, String> {
     let here = std::env::current_dir()
         .ok()
         .and_then(|d| worktree::main_checkout(&d).ok());
+    match mains.len() {
+        0 => return Err("no [[repo]] in ~/.config/worktable/config.toml".to_string()),
+        1 => return Ok(mains[0].clone()),
+        _ => {}
+    }
     if let Some(main) = here.filter(|m| mains.contains(m)) {
         return Ok(main);
     }
-    mains
-        .into_iter()
-        .next()
-        .ok_or_else(|| "no [[repo]] in ~/.config/worktable/config.toml".to_string())
+    if !ui.can_ask() {
+        return Ok(mains[0].clone());
+    }
+    let names: Vec<String> = mains.iter().map(|m| m.display().to_string()).collect();
+    Ok(mains[ui.pick("Repository", &names)?].clone())
+}
+
+/// The main checkout that has worktree `name`, if any repo has it.
+pub(super) fn repo_with_worktree(config: &Config, name: &str) -> Option<PathBuf> {
+    config
+        .repos
+        .iter()
+        .filter_map(|r| worktree::main_checkout(&r.path).ok())
+        .find(|main| worktree::worktree_dir(main, name).exists())
 }
 
 pub(super) fn list(items: &[String]) -> Value {

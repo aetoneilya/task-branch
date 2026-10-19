@@ -106,6 +106,7 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
     let filter = options.filter.to_lowercase();
     let keep = |text: String| filter.is_empty() || text.to_lowercase().contains(&filter);
     let mut roots = Vec::new();
+    let mut tasks: Vec<Option<Node>> = table.tasks.iter().map(|_| None).collect();
 
     // the table keeps tasks by state, newest first; done ones come last
     for (i, row) in table.tasks.iter().enumerate() {
@@ -185,12 +186,36 @@ pub fn build(table: &Table, options: &Options) -> Vec<Node> {
                 )
             }));
         }
-        roots.push(Node {
+        tasks[i] = Some(Node {
             id: format!("task:{}", row.task.name),
             kind: Kind::Task(i),
             children,
         });
     }
+    // a task goes under its parent when that is shown, after the parent's own
+    // rows; the deepest first, so a subtask moves with its parent
+    let parent: Vec<Option<usize>> = (0..tasks.len())
+        .map(|i| table.tasks[i].parent.filter(|&p| tasks[p].is_some()))
+        .collect();
+    let depth = |mut i: usize| {
+        let mut depth = 0;
+        while let Some(p) = parent[i] {
+            (i, depth) = (p, depth + 1);
+        }
+        depth
+    };
+    let mut nested: Vec<usize> = (0..tasks.len())
+        .filter(|&i| tasks[i].is_some() && parent[i].is_some())
+        .collect();
+    nested.sort_by_key(|&i| std::cmp::Reverse(depth(i)));
+    for i in nested {
+        if let (Some(node), Some(p)) = (tasks[i].take(), parent[i])
+            && let Some(up) = tasks[p].as_mut()
+        {
+            up.children.push(node);
+        }
+    }
+    roots.extend(tasks.into_iter().flatten());
     if options.tag.is_some() {
         return roots;
     }
@@ -416,6 +441,43 @@ mod tests {
                 "  tree:/a".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn subtasks_go_under_their_shown_parent() {
+        let table = table(
+            vec![
+                task_note("project", "tags: [project]", "2026-10-01"),
+                task_note("part", "parent: \"[[Project|the project]]\"", "2026-10-02"),
+                task_note(
+                    "old part",
+                    "parent: \"[[project]]\"\ndone: true",
+                    "2026-10-03",
+                ),
+                task_note("a", "parent: \"[[b]]\"", "2026-10-04"),
+                task_note("b", "parent: \"[[a]]\"", "2026-10-05"),
+            ],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let shown = |all: bool| {
+            outline(&build(
+                &table,
+                &Options {
+                    all,
+                    ..Default::default()
+                },
+            ))
+        };
+        // a loop leaves both at the top
+        assert_eq!(
+            shown(false),
+            vec!["task:b", "task:a", "task:project", "  task:part"]
+        );
+        assert!(shown(true).contains(&"  task:old part".to_string()));
+        let project = table.tasks.iter().position(|r| r.task.name == "project");
+        assert_eq!(table.subtasks(project.unwrap()).len(), 2);
     }
 
     #[test]

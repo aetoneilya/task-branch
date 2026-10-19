@@ -68,6 +68,12 @@ impl Rows<'_> {
             });
             return;
         }
+        // a subtask is a root of its own for what keys act on
+        let root = if let Kind::Task(_) = node.kind {
+            &node.kind
+        } else {
+            root
+        };
         let is_folded = self.folded.contains(&node.id);
         let mut spans = vec![dim(format!("{indent}{glyph}"))];
         spans.extend(label(self.table, &node.kind));
@@ -158,6 +164,7 @@ fn label(table: &Table, kind: &Kind) -> Vec<Span<'static>> {
             if !row.task.tags.is_empty() {
                 pieces.push(Piece::dim(format!(" #{}", row.task.tags.join(" #"))));
             }
+            pieces.extend(look::progress(table, *i));
             pieces
         }
         Kind::Loose(i) => {

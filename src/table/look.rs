@@ -2,7 +2,7 @@
 //! colors as pieces of text with a tone, which each renderer maps to its own
 //! styles. Where the pieces go stays with the renderers.
 
-use super::{AgentStatus, Category, Mr, RowState, Ticket, Tree};
+use super::{AgentStatus, Category, Mr, RowState, Table, Ticket, Tree};
 use crate::client::gitlab::{MrReview, MrState};
 use crate::vault::task::TaskState;
 
@@ -222,6 +222,34 @@ pub fn pipeline(review: &MrReview) -> Option<Piece> {
         "canceled" | "skipped" => Piece::dim(" ci–"),
         _ => Piece::new(" ci…", Tone::Yellow),
     })
+}
+
+/// `width` cells filled up to `done` (0..=1).
+pub fn bar(done: f64, width: usize) -> String {
+    let filled = ((done.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
+    "▰".repeat(filled) + &"▱".repeat(width - filled)
+}
+
+/// ` ▰▰▱▱▱ 2/5`: how many of a project's tasks are done; none without tasks.
+pub fn progress(table: &Table, task: usize) -> Option<Piece> {
+    let subtasks = table.subtasks(task);
+    if subtasks.is_empty() {
+        return None;
+    }
+    let done = subtasks
+        .iter()
+        .filter(|&&i| table.tasks[i].task.done)
+        .count();
+    let share = done as f64 / subtasks.len() as f64;
+    let tone = if done == subtasks.len() {
+        Tone::Green
+    } else {
+        Tone::Dim
+    };
+    Some(Piece::new(
+        format!(" {} {done}/{}", bar(share, 8), subtasks.len()),
+        tone,
+    ))
 }
 
 /// An agent's status, colored by what it needs from me.

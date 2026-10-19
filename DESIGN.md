@@ -38,7 +38,9 @@ task  (note: shared context; any size — a "project" is just a big task)
   editing `tickets:`), and by sync: a key on a worktree or MR that belongs to the
   task (through its herdr workspace or a worktree's branch) and that no note
   lists yet is added to the task's `tickets:`. Everything else is derived.
-- **Nesting** is optional: `parent: "[[единый образ]]"`.
+- **Nesting** is optional: `parent: "[[единый образ]]"`. A task shows under its
+  parent when that is shown, after the parent's own rows; the parent shows how
+  many of its tasks are done (`▰▰▰▱▱ 3/5`). A loop of parents nests nothing.
 - **Tags** — plain Obsidian `tags:`; used for filtering and "similar tasks".
 - **Loose ends** — anything not reachable from a task: my in-progress tickets with
   no task, my open MRs whose key belongs to no task, worktrees with no task,

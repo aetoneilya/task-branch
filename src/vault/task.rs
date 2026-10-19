@@ -83,11 +83,20 @@ pub struct Task {
     pub name: String,
     pub tickets: Vec<String>,
     pub tags: Vec<String>,
+    /// The task this one is part of, by name: `parent: "[[name]]"`.
+    pub parent: Option<String>,
     pub done: bool,
     pub state: Option<TaskState>,
     pub sessions: Vec<SessionRef>,
     /// When the note was created, RFC 3339; set by `load_tasks`.
     pub created: Option<String>,
+}
+
+/// The note `[[name]]`, `[[name|alias]]` or a bare `name` points at.
+fn link_target(link: &str) -> Option<String> {
+    let inner = link.trim().trim_start_matches("[[").trim_end_matches("]]");
+    let name = inner.split(['|', '#']).next().unwrap_or("").trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 impl Task {
@@ -100,6 +109,7 @@ impl Task {
                 .flat_map(|t| ticket_keys(t))
                 .collect(),
             tags: note.strings("tags"),
+            parent: note.string("parent").and_then(|p| link_target(&p)),
             done: note.flag("done"),
             state: note.string("state").as_deref().and_then(TaskState::parse),
             sessions: note

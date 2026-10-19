@@ -179,6 +179,8 @@ pub fn assemble(inputs: Inputs) -> Table {
 
     // active work first, newest first within a state
     rows.sort_by(|a, b| (task_rank(a), &b.task.created).cmp(&(task_rank(b), &a.task.created)));
+    // indices into the sorted rows
+    link_parents(&mut rows);
     // worked on before in review before nothing done, newest first within each
     let loose_rank = |l: &LooseTicket| match l.state {
         Some(TaskState::Review) => 1,
@@ -264,6 +266,7 @@ fn task_row(
         space,
         agents: Vec::new(),
         state: None,
+        parent: None,
     }
 }
 
@@ -390,6 +393,37 @@ pub(super) fn agents_in(
         })
         .map(Agent::from_herdr)
         .collect()
+}
+
+/// Each task's `parent` note, when it is a task too; none that would make a
+/// loop.
+fn link_parents(rows: &mut [TaskRow]) {
+    let by_name: HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.task.name.trim().to_lowercase(), i))
+        .collect();
+    let named: Vec<Option<usize>> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let parent = by_name.get(&r.task.parent.as_ref()?.trim().to_lowercase())?;
+            (*parent != i).then_some(*parent)
+        })
+        .collect();
+    for (i, row) in rows.iter_mut().enumerate() {
+        // up the chain: back to itself is a loop
+        let mut seen = vec![i];
+        let mut at = named[i];
+        while let Some(p) = at {
+            if seen.contains(&p) {
+                break;
+            }
+            seen.push(p);
+            at = named[p];
+        }
+        row.parent = named[i].filter(|_| at.is_none());
+    }
 }
 
 /// Agents of herdr workspace `space` that work in none of `trees`.

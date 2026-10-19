@@ -133,7 +133,8 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
         },
     );
     let mut rows: Vec<[Cell; 4]> = Vec::new();
-    let mut finished_tasks = Vec::new();
+    let mut finished = Vec::new();
+    finished_tasks(table, &nodes, &mut finished);
     let mut loose_shown = 0;
 
     for node in &nodes {
@@ -148,22 +149,7 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
                 ]);
             }
             Kind::Task(i) => {
-                let row = &table.tasks[*i];
-                if !row.task.done && row.current_state() == Some(TaskState::Finished) {
-                    finished_tasks.push(row.task.name.clone());
-                }
-                let mut name = Cell::styled(truncate(&row.task.name, NAME_WIDTH), Tone::Bold);
-                let tags: String = row.task.tags.iter().map(|t| format!(" #{t}")).collect();
-                let room = NAME_WIDTH.saturating_sub(name.text.chars().count());
-                if !tags.is_empty() && room > 2 {
-                    name.push(Cell::styled(truncate(&tags, room), Tone::Dim));
-                }
-                rows.push([
-                    name,
-                    look::state(row.row_state(), true).into(),
-                    Cell::default(),
-                    agents_cell(table, node),
-                ]);
+                rows.push(task_cells(table, *i, node, Cell::default(), NAME_WIDTH));
                 rows.extend(children(table, node, None, ""));
             }
             Kind::Loose(i) => {
@@ -217,11 +203,11 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
     let finished_trees = table.trees.iter().filter(|t| t.finished).count();
     let hidden = table.loose.len().saturating_sub(loose_shown) + table.other_mrs.len();
     let mut footer = Vec::new();
-    if !finished_tasks.is_empty() {
+    if !finished.is_empty() {
         footer.push(format!(
             "{} {}",
             paint("finished, can be closed:", Tone::Dim),
-            finished_tasks.join(", ")
+            finished.join(", ")
         ));
     }
     if finished_trees > 0 && tag.is_none() {
@@ -338,6 +324,11 @@ fn children(table: &Table, node: &Node, key: Option<&str>, indent: &str) -> Vec<
                     Cell::default(),
                 ]);
             }
+            Kind::Task(i) => {
+                lines.push(task_cells(table, *i, item, name, NAME_WIDTH));
+                let deeper = format!("{indent}{}", if last { "   " } else { "│  " });
+                lines.extend(children(table, item, None, &deeper));
+            }
             Kind::Ticket(k) => {
                 let ticket = table.tickets.get(k);
                 name.push(Cell::link(look::key(k), &table.ticket_url(k)));
@@ -355,6 +346,42 @@ fn children(table: &Table, node: &Node, key: Option<&str>, indent: &str) -> Vec<
         }
     }
     lines
+}
+
+/// A task's row: `lead`, its name, tags and how many of its subtasks are done
+/// in `width`; its state and the agents right under it.
+fn task_cells(table: &Table, i: usize, node: &Node, lead: Cell, width: usize) -> [Cell; 4] {
+    let row = &table.tasks[i];
+    let mut name = lead;
+    let room = width.saturating_sub(name.text.chars().count());
+    let progress = look::progress(table, i).map(Cell::from).unwrap_or_default();
+    let room = room.saturating_sub(progress.text.chars().count());
+    name.push(Cell::styled(truncate(&row.task.name, room), Tone::Bold));
+    let tags: String = row.task.tags.iter().map(|t| format!(" #{t}")).collect();
+    let room = width.saturating_sub(name.text.chars().count() + progress.text.chars().count());
+    if !tags.is_empty() && room > 2 {
+        name.push(Cell::styled(truncate(&tags, room), Tone::Dim));
+    }
+    name.push(progress);
+    [
+        name,
+        look::state(row.row_state(), true).into(),
+        Cell::default(),
+        agents_cell(table, node),
+    ]
+}
+
+/// Open tasks whose work is all finished, here and in subtasks: `wt done` them.
+fn finished_tasks(table: &Table, nodes: &[Node], out: &mut Vec<String>) {
+    for node in nodes {
+        if let Kind::Task(i) = node.kind {
+            let row = &table.tasks[i];
+            if !row.task.done && row.current_state() == Some(TaskState::Finished) {
+                out.push(row.task.name.clone());
+            }
+            finished_tasks(table, &node.children, out);
+        }
+    }
 }
 
 /// The worktree's name with its marks: changed files, unpushed commits, merged

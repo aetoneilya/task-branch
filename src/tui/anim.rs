@@ -1,6 +1,7 @@
 //! Spinners and bars for what is still loading; the event loop redraws often
 //! enough for them to move while `App::animating` holds.
 
+pub(super) use crate::table::look::bar;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -18,12 +19,6 @@ fn frame() -> usize {
 /// The spinner's current frame.
 pub(super) fn spinner() -> &'static str {
     SPINNER[frame() % SPINNER.len()]
-}
-
-/// `width` cells filled up to `done` (0..=1).
-pub(super) fn bar(done: f64, width: usize) -> String {
-    let filled = ((done.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
-    "▰".repeat(filled) + &"▱".repeat(width - filled)
 }
 
 /// `width` cells with a short block going back and forth: progress unknown.

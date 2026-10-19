@@ -200,6 +200,8 @@ pub struct TaskRow {
     pub agents: Vec<Agent>,
     /// None when Jira or GitLab did not answer.
     pub state: Option<TaskState>,
+    /// The task this one is part of, index into `Table::tasks`.
+    pub parent: Option<usize>,
 }
 
 impl TaskRow {
@@ -400,6 +402,13 @@ impl Table {
             names.push((agent.pane.clone(), name));
         }
         names
+    }
+
+    /// The tasks whose parent is task `i`, in table order.
+    pub fn subtasks(&self, i: usize) -> Vec<usize> {
+        (0..self.tasks.len())
+            .filter(|&t| self.tasks[t].parent == Some(i))
+            .collect()
     }
 
     /// The agent an agent row shows.

@@ -109,6 +109,26 @@ impl JiraClient {
         checked(response).map(|_| ())
     }
 
+    /// Creates a ticket assigned to me; returns its key.
+    pub fn create_issue(&self, project: &str, issue_type: &str, summary: &str) -> Result<String> {
+        let me: Myself = self.get_json(&format!("{}/rest/api/2/myself", self.base_url), &[])?;
+        let url = format!("{}/rest/api/2/issue", self.base_url);
+        let fields = serde_json::json!({
+            "project": { "key": project },
+            "issuetype": { "name": issue_type },
+            "summary": summary,
+            "assignee": { "name": me.name },
+        });
+        let response = self
+            .client
+            .post(&url)
+            .timeout(Duration::from_secs(10))
+            .json(&serde_json::json!({ "fields": fields }))
+            .send()?;
+        let created: Created = checked(response)?.json()?;
+        Ok(created.key)
+    }
+
     pub fn get_issue_by_key(&self, key: &str) -> Result<JiraIssue> {
         let url = format!("{}/rest/api/2/issue/{}", self.base_url, key);
         self.get_json(&url, &[])
@@ -126,6 +146,16 @@ impl JiraClient {
         let result: JiraSearchResult = self.get_json(&url, &query)?;
         Ok(result.issues)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct Myself {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Created {
+    key: String,
 }
 
 #[derive(Debug, Deserialize)]

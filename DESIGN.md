@@ -192,7 +192,7 @@ wt select [<task | KEY>]    go back to existing work
 wt status                   the table in plain text
 ```
 
-### `wt start <task name | KEY> [-k KEY]... [-t tag]... [-m text] [-n name] [-b branch] [--bg]`
+### `wt start <task name | KEY> [-k KEY]... [-t tag]... [-m text] [-n name] [-b branch] [--bg] [--new-ticket] [--only note|workspace]`
 
 - **A ticket key** (`UCP-12345`) — a new task named after the ticket's summary
   (characters a file name can't hold dropped), with that ticket: the same as
@@ -205,6 +205,10 @@ wt status                   the table in plain text
   note. Never `herdr worktree open`: it files the workspace under the repo group. If a task with that name exists, it says so
   and suggests `wt select` / `wt add`. Before creating, lists tasks with similar
   tags/title and asks whether one of them was meant.
+- **`--new-ticket`** — first creates a Jira ticket named after the task, assigned
+  to me, in `[jira] project` with `issue_type`; it becomes the first ticket.
+- **`--only note`** creates just the note, **`--only workspace`** the note and
+  the herdr workspace with a shell in the repo — no worktree, no agent.
 - **No argument** — fuzzy picker over my open Jira tickets not in any task, plus
   "new task…".
 
@@ -269,7 +273,7 @@ wt completions <shell>     shell completion script
 
 There is no separate sync command: `wt status` and the TUI's refresh write
 changed `state`, `sessions` and found tickets. Nothing creates notes implicitly —
-only `wt start`; worktable never creates tickets.
+only `wt start`; tickets only `wt start --new-ticket`.
 
 ## TUI
 
@@ -347,6 +351,8 @@ the path in `WORKTABLE_CONFIG`):
 ```toml
 [jira]
 host = "https://jira.vk.team"
+project = "UCP"            # where wt start --new-ticket creates tickets
+issue_type = "Задача"       # their type as the project names it (default Task)
 
 [gitlab]
 host = "gitlab.corp.mail.ru"

@@ -85,6 +85,21 @@ pub(crate) struct StartArgs {
     /// Don't switch to the new tab
     #[arg(long)]
     pub(crate) bg: bool,
+    /// Create a Jira ticket named after the task, assigned to me
+    /// (`[jira] project`, `issue_type`)
+    #[arg(long)]
+    pub(crate) new_ticket: bool,
+    /// Create only the note, or the note and the herdr workspace; default: also
+    /// the worktree tab with claude
+    #[arg(long, value_enum)]
+    pub(crate) only: Option<Only>,
+}
+
+/// What `wt start --only` creates.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Only {
+    Note,
+    Workspace,
 }
 
 #[derive(Args, Debug, Default)]

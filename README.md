@@ -22,6 +22,8 @@ the path in `WORKTABLE_CONFIG`):
 ```toml
 [jira]
 host = "https://jira.vk.team"
+project = "UCP"            # where wt start --new-ticket creates tickets
+issue_type = "Задача"       # their type as the project names it (default Task)
 
 [gitlab]
 host = "gitlab.corp.mail.ru"

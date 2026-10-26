@@ -6,6 +6,15 @@ use thiserror::Error;
 #[derive(Debug, Deserialize)]
 pub struct JiraConfig {
     pub host: String,
+    /// Where `wt start --new-ticket` creates tickets, e.g. "UCP".
+    pub project: Option<String>,
+    /// Their type, by name as the project shows it.
+    #[serde(default = "default_issue_type")]
+    pub issue_type: String,
+}
+
+fn default_issue_type() -> String {
+    "Task".to_string()
 }
 
 #[derive(Debug, Deserialize)]

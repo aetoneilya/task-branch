@@ -105,6 +105,20 @@ pub(super) fn open_work(
     Ok(())
 }
 
+/// The task's herdr workspace with a shell in `cwd`, no worktree or agent.
+pub(super) fn open_space(task: &Task, cwd: &Path, focus: bool, ui: &mut dyn Ui) -> Result<(), String> {
+    if !herdr::available() {
+        ui.say("not in herdr — no workspace".to_string());
+        return Ok(());
+    }
+    let (tab, _) = herdr::create_workspace(&task.name, cwd).map_err(err)?;
+    if focus {
+        let _ = herdr::focus_tab(&tab);
+    }
+    ui.say(format!("workspace \"{}\"", task.name));
+    Ok(())
+}
+
 /// `wt prepare <spec>`, run by `open_work` in the new tab: creates the worktree
 /// with progress on screen, writes the brief and the first prompt; the tab's
 /// shell then cds into the worktree and starts claude.

@@ -194,6 +194,7 @@ impl App {
         };
         for (key, label) in [
             ("/", "filter"),
+            ("z", "fold all"),
             (".", all),
             ("v", "show"),
             ("p", preview),
@@ -288,6 +289,7 @@ impl App {
     fn draw_help(&self, frame: &mut Frame) {
         let text = vec![
             "↑↓ j k     move             ← h  fold / to parent        → l  unfold        space  fold",
+            "z          fold all / unfold all",
             "⏎          agent: focus; worktree: its agent or claude --resume; task: wt select",
             "b          ticket / MR in the browser   o  note in Obsidian       e  note in $EDITOR",
             "i          worktree in IntelliJ IDEA ([workflow] ide); on a task: its only worktree",

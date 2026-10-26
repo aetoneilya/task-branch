@@ -362,9 +362,11 @@ impl App {
             .as_ref()
             .and_then(|id| self.rows.iter().position(|r| &r.id == id))
             .unwrap_or_else(|| {
+                // at first the first task, not "+ new task"
+                let first = (self.rows.len() > 1) as usize;
                 self.list
                     .selected()
-                    .unwrap_or(0)
+                    .unwrap_or(first)
                     .min(self.rows.len().saturating_sub(1))
             });
         self.select(index);

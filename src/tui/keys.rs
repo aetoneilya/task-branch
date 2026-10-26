@@ -54,6 +54,7 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.select(0),
             KeyCode::End | KeyCode::Char('G') => self.select(usize::MAX),
             KeyCode::Char(' ') => self.toggle_fold(),
+            KeyCode::Char('z') => self.fold_all(),
             KeyCode::Left | KeyCode::Char('h') => self.fold_or_parent(),
             KeyCode::Right | KeyCode::Char('l') => self.unfold(),
             KeyCode::Char('/') => self.prompt = Some((Prompt::Filter, self.filter.clone())),
@@ -190,6 +191,30 @@ impl App {
         let id = row.id.clone();
         if !self.folded.remove(&id) {
             self.folded.insert(id);
+        }
+        self.rebuild();
+    }
+
+    /// `z`: folds every top-level row, or unfolds everything once they all are.
+    fn fold_all(&mut self) {
+        let roots: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| r.parent.is_none() && r.has_children)
+            .map(|r| r.id.clone())
+            .collect();
+        if roots.iter().all(|id| self.folded.contains(id)) {
+            self.folded.clear();
+        } else {
+            // the selection moves up to its top-level row, which stays
+            let mut at = self.list.selected();
+            while let Some(parent) = at.and_then(|i| self.rows.get(i)).and_then(|r| r.parent) {
+                at = Some(parent);
+            }
+            if let Some(row) = at.and_then(|i| self.rows.get(i)) {
+                self.selected = Some(row.id.clone());
+            }
+            self.folded.extend(roots);
         }
         self.rebuild();
     }

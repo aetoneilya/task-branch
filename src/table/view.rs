@@ -19,7 +19,7 @@ pub enum Kind {
     Agent(AgentAt, usize),
     /// A section title; never selected.
     Header(Section),
-    /// The TUI's "+ new task" row, after the tasks.
+    /// The TUI's "+ new task" row, above the tasks.
     NewTask,
 }
 

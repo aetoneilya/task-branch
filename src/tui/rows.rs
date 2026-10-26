@@ -38,19 +38,9 @@ pub fn build(
         folded,
         rows: Vec::new(),
     };
-    let nodes = view::build(table, &options);
-    let tasks_end = nodes
-        .iter()
-        .position(|n| n.kind.is_header())
-        .unwrap_or(nodes.len());
-    for (i, node) in nodes.iter().enumerate() {
-        if i == tasks_end {
-            rows.add_new_task();
-        }
+    rows.add_new_task();
+    for node in &view::build(table, &options) {
         rows.add(node, None, &node.kind, "", "");
-    }
-    if tasks_end == nodes.len() {
-        rows.add_new_task();
     }
     rows.rows
 }

@@ -136,6 +136,7 @@ impl App {
                 }
                 Kind::Mr(_) => keys.push(("⏎", "open MR".into())),
                 Kind::Header(_) => {}
+                Kind::NewTask => keys.push(("⏎", "new task".into())),
                 Kind::Tree(t) => {
                     let tree = self.table.tree(*t);
                     if !tree.agents.is_empty() {
@@ -193,7 +194,6 @@ impl App {
             "details"
         };
         for (key, label) in [
-            ("n", "new task"),
             ("/", "filter"),
             (".", all),
             ("v", "show"),
@@ -292,7 +292,7 @@ impl App {
             "b          ticket / MR in the browser   o  note in Obsidian       e  note in $EDITOR",
             "i          worktree in IntelliJ IDEA ([workflow] ide); on a task: its only worktree",
             "s          ticket: wt start KEY; task: add a ticket (wt add)",
-            "n          new task (wt start)          c  pick a session (wt select --session)",
+            "c          pick a session (wt select --session); ⏎ on \"+ new task\": wt start",
             "a          ticket without a task: attach it to a task (wt attach)",
             "N          add a dated line to the task note",
             "R          review worktree (wt review)  d  worktree: remove it; task: close it with its Jira tickets",

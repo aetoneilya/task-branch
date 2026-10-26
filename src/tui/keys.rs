@@ -93,7 +93,6 @@ impl App {
             KeyCode::Char('o') => self.open_note_in_obsidian(),
             KeyCode::Char('e') => self.edit_note(terminal),
             KeyCode::Char('s') => self.start(),
-            KeyCode::Char('n') => self.prompt = Some((Prompt::NewTask, String::new())),
             KeyCode::Char('c') => {
                 if let Some(target) = self.target() {
                     self.select_work(SelectArgs {
@@ -256,13 +255,15 @@ impl App {
                     _ => None,
                 }
             }
-            Kind::Task(_) | Kind::Agent(AgentAt::Task(_), _) | Kind::Header(_) => None,
+            Kind::Task(_) | Kind::Agent(AgentAt::Task(_), _) | Kind::Header(_) | Kind::NewTask => {
+                None
+            }
         }
     }
 
     /// ⏎: to the agent of the selection — focus a live one, otherwise `wt select`
     /// resumes or starts claude there; an MR opens in the browser.
-    fn go(&mut self) {
+    pub(super) fn go(&mut self) {
         let Some(row) = self.current() else { return };
         match row.kind.clone() {
             Kind::Agent(at, a) => self.focus(&self.table.agent(at, a).name.clone()),
@@ -288,6 +289,7 @@ impl App {
                 ..SelectArgs::default()
             }),
             Kind::Header(_) => {}
+            Kind::NewTask => self.prompt = Some((Prompt::NewTask, String::new())),
             // nothing `wt select` can get back to yet: no worktree, no open MR
             Kind::Loose(i) if self.table.loose[i].state.is_none() => {
                 let key = self.table.loose[i].key.clone();

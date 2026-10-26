@@ -398,7 +398,10 @@ impl App {
                 if index >= self.rows.len() || self.rows[index].kind.is_header() {
                     return;
                 }
-                if self.list.selected() == Some(index) {
+                if self.rows[index].kind == Kind::NewTask {
+                    self.select(index);
+                    self.go();
+                } else if self.list.selected() == Some(index) {
                     self.toggle_fold();
                 } else {
                     self.select(index);

@@ -19,6 +19,8 @@ pub enum Kind {
     Agent(AgentAt, usize),
     /// A section title; never selected.
     Header(Section),
+    /// The TUI's "+ new task" row, after the tasks.
+    NewTask,
 }
 
 /// Whose agent an agent row shows.

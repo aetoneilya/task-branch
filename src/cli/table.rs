@@ -186,7 +186,7 @@ fn print_status(table: &Table, tag: Option<&str>, all: bool) {
                 mr_link(table, *m),
                 Cell::default(),
             ]),
-            Kind::Ticket(_) | Kind::Agent(..) => {}
+            Kind::Ticket(_) | Kind::Agent(..) | Kind::NewTask => {}
         }
     }
 

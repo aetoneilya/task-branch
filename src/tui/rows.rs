@@ -38,8 +38,19 @@ pub fn build(
         folded,
         rows: Vec::new(),
     };
-    for node in &view::build(table, &options) {
+    let nodes = view::build(table, &options);
+    let tasks_end = nodes
+        .iter()
+        .position(|n| n.kind.is_header())
+        .unwrap_or(nodes.len());
+    for (i, node) in nodes.iter().enumerate() {
+        if i == tasks_end {
+            rows.add_new_task();
+        }
         rows.add(node, None, &node.kind, "", "");
+    }
+    if tasks_end == nodes.len() {
+        rows.add_new_task();
     }
     rows.rows
 }
@@ -96,6 +107,17 @@ impl Rows<'_> {
             ));
         }
         spans
+    }
+
+    fn add_new_task(&mut self) {
+        self.rows.push(Row {
+            id: "+new task".to_string(),
+            kind: Kind::NewTask,
+            root: Kind::NewTask,
+            line: Line::from(Span::styled("+ new task", style(Tone::Green))),
+            parent: None,
+            has_children: false,
+        });
     }
 
     /// The node's row under `parent`, drawn after `indent` and `glyph`, then
@@ -244,7 +266,7 @@ fn label(table: &Table, kind: &Kind) -> Vec<Span<'static>> {
             pieces.push(Piece::plain(format!(" {}", look::summary(ticket))));
             pieces
         }
-        Kind::Header(_) => Vec::new(),
+        Kind::Header(_) | Kind::NewTask => Vec::new(),
         Kind::Ticket(key) => look::ticket(key, table.tickets.get(key)),
         Kind::Mr(m) => {
             let mr = table.mr(*m);

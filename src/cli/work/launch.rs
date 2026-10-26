@@ -217,6 +217,16 @@ pub(super) fn live_agents() -> Vec<herdr::Agent> {
 /// Closes what herdr shows of a removed worktree: its own workspace, otherwise
 /// the tabs whose agents work in it. Failures go to `say`.
 pub(super) fn close_herdr_views(path: &Path, say: &mut dyn FnMut(String)) {
+    close_herdr_views_outside(path, None, say);
+}
+
+/// `close_herdr_views`, leaving workspace `kept` alone: it is closed whole
+/// later.
+pub(super) fn close_herdr_views_outside(
+    path: &Path,
+    kept: Option<&str>,
+    say: &mut dyn FnMut(String),
+) {
     if !herdr::available() {
         return;
     }
@@ -224,6 +234,7 @@ pub(super) fn close_herdr_views(path: &Path, say: &mut dyn FnMut(String)) {
     let workspaces = herdr::list_workspaces().unwrap_or_default();
     let own: Vec<_> = workspaces
         .iter()
+        .filter(|ws| Some(ws.workspace_id.as_str()) != kept)
         .filter(|ws| {
             ws.worktree
                 .as_ref()
@@ -243,7 +254,7 @@ pub(super) fn close_herdr_views(path: &Path, say: &mut dyn FnMut(String)) {
     // a tab in the task's workspace: close the tabs whose agents work in the worktree
     let mut tabs: Vec<String> = live_agents()
         .into_iter()
-        .filter(|a| a.runs_in(path))
+        .filter(|a| a.runs_in(path) && Some(a.workspace_id.as_str()) != kept)
         .map(|a| a.tab_id)
         .collect();
     tabs.dedup();

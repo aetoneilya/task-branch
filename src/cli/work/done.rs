@@ -4,7 +4,7 @@ use super::common::{
     Terminal, Ui, confirm, err, find_task, is_ticket_key, list, resolve_task, resolve_tree,
     tree_table,
 };
-use super::launch::close_herdr_views;
+use super::launch::{close_herdr_views, close_herdr_views_outside};
 use crate::cli::DoneArgs;
 use crate::cli::load;
 use crate::client::gitlab::{MergeRequest, MrState};
@@ -48,8 +48,9 @@ fn print(line: String) {
 /// What `wt done <task>` would do, checked against fresh Jira and GitLab: the
 /// task's worktrees go (each must be finished: MR merged or closed, nothing
 /// unpushed; uncommitted changes are lost once confirmed), my open tickets of
-/// it are closed in Jira, and the note gets `done: true` with the final MRs and
-/// branches — after that worktable leaves it alone.
+/// it are closed in Jira, the note gets `done: true` with the final MRs and
+/// branches — after that worktable leaves it alone — and its herdr workspace
+/// closes with every tab, agent and shell in it.
 pub(crate) struct TaskPlan {
     table: Table,
     row: usize,
@@ -82,11 +83,6 @@ impl TaskPlan {
                 }
             })
             .collect();
-        steps.extend(
-            row.agents
-                .iter()
-                .map(|a| format!("close the pane of agent {}", a.name)),
-        );
         steps.extend(self.to_close.iter().map(|k| format!("close {k} in Jira")));
         steps.extend(
             self.left_open
@@ -94,6 +90,9 @@ impl TaskPlan {
                 .map(|k| format!("{k} is not assigned to me — left open")),
         );
         steps.push("mark the note done".to_string());
+        if row.space.is_some() {
+            steps.push(format!("close herdr workspace \"{}\"", row.task.name));
+        }
         steps
     }
 
@@ -255,31 +254,21 @@ pub(crate) fn finish_task(
     }
     say(format!("\"{}\" is done", row.task.name));
 
-    // last: this may close the tab wt itself runs in
+    // last: this may close the tab wt itself runs in, and a popup over it;
+    // whatever is in the task's workspace goes with it in one call
+    let space = row.space.as_deref().filter(|_| herdr::available());
     for &t in &row.trees {
-        close_herdr_views(&table.tree(t).wt.path, &mut |e| problems.push(e));
+        close_herdr_views_outside(&table.tree(t).wt.path, space, &mut |e| problems.push(e));
     }
-    close_agent_panes(row, &mut |e| problems.push(e));
+    if let Some(space) = space
+        && let Err(e) = herdr::close_workspace(space)
+    {
+        problems.push(format!("can't close herdr workspace {space}: {e}"));
+    }
     if problems.is_empty() {
         Ok(())
     } else {
         Err(format!("done, but:\n  {}", problems.join("\n  ")))
-    }
-}
-
-/// Closes the panes of the task's agents outside its worktrees; the pane wt
-/// itself runs in goes last.
-fn close_agent_panes(row: &table::TaskRow, say: &mut dyn FnMut(String)) {
-    if row.agents.is_empty() || !herdr::available() {
-        return;
-    }
-    let own = std::env::var("HERDR_PANE_ID").ok();
-    let mut panes: Vec<&str> = row.agents.iter().map(|a| a.pane.as_str()).collect();
-    panes.sort_by_key(|p| own.as_deref() == Some(*p));
-    for pane in panes {
-        if let Err(e) = herdr::close_pane(pane) {
-            say(format!("can't close pane {pane}: {e}"));
-        }
     }
 }
 
@@ -572,19 +561,11 @@ mod tests {
     use super::{TaskPlan, closing_transition, nothing_to_lose, tree_blockers};
     use crate::client::jira::Transition;
     use crate::table::fixtures::{mr, table, task, tree};
-    use crate::table::{Agent, AgentStatus};
 
     #[test]
-    fn closing_a_task_closes_the_panes_of_its_agents() {
+    fn closing_a_task_closes_its_workspace_last() {
         let mut table = table(vec![task("video", &[])], vec![], vec![], vec![]);
-        table.tasks[0].agents.push(Agent {
-            name: "research".into(),
-            pane: "w1:p2".into(),
-            tab: "w1:t1".into(),
-            status: AgentStatus::Idle,
-            workspace: "w1".into(),
-            active: None,
-        });
+        table.tasks[0].space = Some("w1".into());
         let plan = TaskPlan {
             table,
             row: 0,
@@ -593,9 +574,9 @@ mod tests {
             to_close: vec![],
             left_open: vec![],
         };
-        assert!(
-            plan.steps()
-                .contains(&"close the pane of agent research".to_string())
+        assert_eq!(
+            plan.steps().last().unwrap(),
+            "close herdr workspace \"video\""
         );
     }
 

@@ -17,7 +17,8 @@ use std::sync::mpsc::{Sender, channel};
 pub(super) enum Dialog {
     /// Checks before a confirmation; Esc stops waiting for them.
     Checking(String),
-    /// What the action will do: y runs it. Blocked, it only closes.
+    /// What the action will do and its question: y runs it, n or Esc doesn't.
+    /// Blocked, it only closes.
     Confirm {
         title: String,
         lines: Vec<String>,
@@ -171,7 +172,12 @@ impl Action {
     /// What will happen, or what holds it back; and whether something does.
     fn lines(&self) -> (Vec<String>, bool) {
         let (blockers, mut lines) = match self {
-            Action::DoneTask(plan) => (&plan.blockers, plan.steps()),
+            Action::DoneTask(plan) => {
+                let mut lines = plan.steps();
+                lines.push(String::new());
+                lines.push(plan.question().to_string());
+                (&plan.blockers, lines)
+            }
             Action::DoneTree(plan, warning) => {
                 let mut lines = vec![plan.step()];
                 lines.extend(warning.iter().map(|w| format!("! {w}")));
@@ -341,7 +347,7 @@ impl App {
                 blocked: false,
                 action,
                 ..
-            }) if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) => {
+            }) if key.code == KeyCode::Char('y') => {
                 self.run_command(title, Then::Show, move |config, ui| action.run(config, ui))
             }
             Some(Dialog::Confirm { .. }) if close => {}
@@ -387,7 +393,7 @@ impl App {
                 if *blocked {
                     "Esc close"
                 } else {
-                    "y go   Esc cancel"
+                    "y yes   n no"
                 },
             ),
             Dialog::Report(report) => {

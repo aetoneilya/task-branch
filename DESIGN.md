@@ -254,8 +254,9 @@ kept stable.
 wt review [<worktree>]   reviewer agent next to the task agent
                          (model: `[workflow] review_model`)
 wt done [<task | worktree>] [--merged] [--force] [-y]
-                    remove worktrees, branches, herdr views. On a task: refuses
-                    while anything is open (uncommitted, open MR, unpushed),
+                    remove worktrees, branches, herdr views. On a task: asks y/n,
+                    refuses while an MR is open or commits are unpushed,
+                    uncommitted changes are lost once confirmed,
                     closes my open tickets of it in Jira (a done-category
                     transition like Closed, never Cancelled; others' tickets are
                     left open), closes the panes of its agents outside the

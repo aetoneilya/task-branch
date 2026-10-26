@@ -37,6 +37,8 @@ pub(super) enum Dialog {
     Report(Report),
     /// `v`: which kinds of rows are shown; the selected toggle.
     Hide { selected: usize },
+    /// "+ new task": the form for `wt start`.
+    NewTask(super::new_task::Form),
 }
 
 impl Dialog {
@@ -398,6 +400,7 @@ impl App {
                 }
             },
             Some(Dialog::Hide { selected }) => self.on_hide_key(key, selected),
+            Some(Dialog::NewTask(form)) => self.on_new_task_key(key, form),
             Some(Dialog::Report(mut report)) => {
                 if report.question.is_some() {
                     answer(&mut report, key);
@@ -479,6 +482,11 @@ impl App {
                 };
                 (&report.title, text, hint)
             }
+            Dialog::NewTask(form) => (
+                "new task",
+                super::new_task::lines(form),
+                "↑↓ field   ←→ choose   ⏎ start   Esc cancel",
+            ),
             Dialog::Hide { selected } => (
                 "show",
                 super::hide::lines(self.hide, *selected),

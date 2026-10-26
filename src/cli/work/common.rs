@@ -58,7 +58,7 @@ pub(super) fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-pub(super) fn is_ticket_key(text: &str) -> bool {
+pub(crate) fn is_ticket_key(text: &str) -> bool {
     ticket_keys(text).first().is_some_and(|k| k == text)
 }
 

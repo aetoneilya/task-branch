@@ -35,7 +35,6 @@ impl App {
                 Some((Prompt::AddTicket(task), text)) => {
                     (format!("ticket for \"{task}\": "), text.clone())
                 }
-                Some((Prompt::NewTask, text)) => ("new task: ".to_string(), text.clone()),
                 Some((Prompt::NoteLine(_), text)) => ("note: ".to_string(), text.clone()),
                 None => ("/ ".to_string(), self.filter.clone()),
             };
@@ -224,6 +223,7 @@ impl App {
             match row.kind {
                 Kind::Header(Section::NoTask) => section = 1,
                 Kind::Header(Section::Assigned) => section = 2,
+                Kind::NewTask => {}
                 _ => counts[section] += 1,
             }
         }

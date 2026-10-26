@@ -166,11 +166,6 @@ impl App {
                             self.refresh();
                         }
                     }
-                    Prompt::NewTask => {
-                        if !text.trim().is_empty() {
-                            self.start_work(text.trim().to_string());
-                        }
-                    }
                 }
                 return;
             }
@@ -289,7 +284,7 @@ impl App {
                 ..SelectArgs::default()
             }),
             Kind::Header(_) => {}
-            Kind::NewTask => self.prompt = Some((Prompt::NewTask, String::new())),
+            Kind::NewTask => self.open_new_task(),
             // nothing `wt select` can get back to yet: no worktree, no open MR
             Kind::Loose(i) if self.table.loose[i].state.is_none() => {
                 let key = self.table.loose[i].key.clone();

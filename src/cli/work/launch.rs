@@ -106,7 +106,12 @@ pub(super) fn open_work(
 }
 
 /// The task's herdr workspace with a shell in `cwd`, no worktree or agent.
-pub(super) fn open_space(task: &Task, cwd: &Path, focus: bool, ui: &mut dyn Ui) -> Result<(), String> {
+pub(super) fn open_space(
+    task: &Task,
+    cwd: &Path,
+    focus: bool,
+    ui: &mut dyn Ui,
+) -> Result<(), String> {
     if !herdr::available() {
         ui.say("not in herdr — no workspace".to_string());
         return Ok(());

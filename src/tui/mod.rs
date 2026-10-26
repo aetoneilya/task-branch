@@ -10,6 +10,7 @@ mod dialog;
 mod draw;
 mod hide;
 mod keys;
+mod new_task;
 mod rows;
 
 use crate::client::herdr;
@@ -65,7 +66,6 @@ enum Prompt {
     Filter,
     /// A ticket key to add to the task.
     AddTicket(String),
-    NewTask,
     /// A line for the task note.
     NoteLine(PathBuf),
 }

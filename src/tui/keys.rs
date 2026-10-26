@@ -1,6 +1,6 @@
 //! Key handling and the actions behind the keys.
 
-use super::dialog::Then;
+use super::dialog::{Dialog, Then};
 use super::{
     App, Prompt,
     rows::{AgentAt, Kind},
@@ -8,6 +8,7 @@ use super::{
 use crate::cli::work;
 use crate::cli::{AddArgs, SelectArgs, StartArgs};
 use crate::client::herdr;
+use crate::table::look::clean;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
@@ -125,12 +126,6 @@ impl App {
         let Some((prompt, mut text)) = self.prompt.take() else {
             return;
         };
-        if let Prompt::StartTicket(ticket) = &prompt {
-            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
-                self.start_work(ticket.clone());
-            }
-            return;
-        }
         match key.code {
             KeyCode::Esc => {
                 if let Prompt::Filter = prompt {
@@ -141,7 +136,7 @@ impl App {
             }
             KeyCode::Enter => {
                 match prompt {
-                    Prompt::Filter | Prompt::StartTicket(_) => {}
+                    Prompt::Filter => {}
                     Prompt::AddTicket(task) => {
                         let key = text.trim().to_uppercase();
                         if !key.is_empty() {
@@ -296,7 +291,17 @@ impl App {
             // nothing `wt select` can get back to yet: no worktree, no open MR
             Kind::Loose(i) if self.table.loose[i].state.is_none() => {
                 let key = self.table.loose[i].key.clone();
-                self.prompt = Some((Prompt::StartTicket(key), String::new()));
+                let summary = self
+                    .table
+                    .tickets
+                    .get(&key)
+                    .map(|t| clean(&t.summary))
+                    .unwrap_or_default();
+                self.dialog = Some(Dialog::Start {
+                    key,
+                    summary,
+                    yes: true,
+                });
             }
             Kind::Task(_) | Kind::Loose(_) => {
                 if let Some(target) = self.target() {
@@ -318,7 +323,7 @@ impl App {
     }
 
     /// `wt start <target>`: a task with its worktree tab and agent.
-    fn start_work(&mut self, target: String) {
+    pub(super) fn start_work(&mut self, target: String) {
         self.run_command(
             format!("start {target}"),
             Then::Navigate,

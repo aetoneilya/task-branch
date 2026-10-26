@@ -66,8 +66,6 @@ enum Prompt {
     /// A ticket key to add to the task.
     AddTicket(String),
     NewTask,
-    /// y/n before `wt start <key>`: it creates a note, a worktree and an agent.
-    StartTicket(String),
     /// A line for the task note.
     NoteLine(PathBuf),
 }

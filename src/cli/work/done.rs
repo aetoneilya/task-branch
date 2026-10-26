@@ -96,9 +96,14 @@ impl TaskPlan {
         steps
     }
 
+    /// Whether running it loses uncommitted changes.
+    pub(crate) fn loses_changes(&self) -> bool {
+        !self.dirty.is_empty()
+    }
+
     /// Asked before the plan runs.
     pub(crate) fn question(&self) -> &'static str {
-        if self.dirty.is_empty() {
+        if !self.loses_changes() {
             "Close it?"
         } else {
             "Close it, losing the uncommitted changes?"

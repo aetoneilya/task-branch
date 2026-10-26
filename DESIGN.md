@@ -254,7 +254,7 @@ kept stable.
 wt review [<worktree>]   reviewer agent next to the task agent
                          (model: `[workflow] review_model`)
 wt done [<task | worktree>] [--merged] [--force] [-y]
-                    remove worktrees, branches, herdr views. On a task: asks y/n,
+                    remove worktrees, branches, herdr views. On a task: asks yes/no,
                     refuses while an MR is open or commits are unpushed,
                     uncommitted changes are lost once confirmed,
                     closes my open tickets of it in Jira (a done-category
@@ -314,7 +314,7 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 | `b` | ticket, MR, worktree | open in the browser |
 | `i` | worktree, or a task/ticket with one worktree | open it in the IDE (`[workflow] ide`, default "IntelliJ IDEA", via `open -a`) |
 | `o` / `e` | anything under a task | note in Obsidian / in `$EDITOR` |
-| `⏎` | ticket nothing is done on | asks y/n, then `wt start KEY` |
+| `⏎` | ticket nothing is done on | asks yes/no, then `wt start KEY` |
 | `s` | ticket / task | `wt start KEY` / asks a key for `wt add` |
 | `a` | ticket without a task | `wt attach KEY`: pick a task, the key joins its `tickets:` |
 | `N` | anything under a task | a dated line at the end of the note's own text |
@@ -330,9 +330,10 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 
 Commands run in the TUI process, on a background thread, behind a dialog: their
 lines show there, and their pickers and confirmations are asked there (a `Ui`
-trait: dialoguer and stdout in the CLI, the update channel in the TUI). `d`
-checks first and lists what goes before `y`; a blocked task or worktree only
-shows its blockers. Work that was opened (`select`, `start`, `add`) closes the
+trait: dialoguer and stdout in the CLI, the update channel in the TUI). Every
+yes/no there is two fields, yes and no, picked with the arrows and ⏎ (or y, n);
+it starts on no when something is lost. `d` checks first and lists what goes
+before the question; a blocked task or worktree only shows its blockers. Work that was opened (`select`, `start`, `add`) closes the
 dialog with its last line in the footer, and a herdr popup with it. Only
 `wt prepare` runs as a process: in the new tab, before claude.
 

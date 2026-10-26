@@ -4,7 +4,6 @@ use super::{
     App, MESSAGE_FOR, PREVIEW_MIN_WIDTH, Prompt, anim,
     rows::{self, AgentAt, Kind},
 };
-use crate::table::look::clean;
 use crate::table::view::Section;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
@@ -38,18 +37,6 @@ impl App {
                 }
                 Some((Prompt::NewTask, text)) => ("new task: ".to_string(), text.clone()),
                 Some((Prompt::NoteLine(_), text)) => ("note: ".to_string(), text.clone()),
-                Some((Prompt::StartTicket(key), _)) => {
-                    let summary = self
-                        .table
-                        .tickets
-                        .get(key)
-                        .map(|t| clean(&t.summary))
-                        .unwrap_or_default();
-                    (
-                        format!("start a task from {key} «{summary}»? "),
-                        "y / n".to_string(),
-                    )
-                }
                 None => ("/ ".to_string(), self.filter.clone()),
             };
             let cursor = if self.prompt.is_some() { "▏" } else { "" };

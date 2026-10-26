@@ -17,13 +17,21 @@ use std::sync::mpsc::{Sender, channel};
 pub(super) enum Dialog {
     /// Checks before a confirmation; Esc stops waiting for them.
     Checking(String),
-    /// What the action will do and its question: y runs it, n or Esc doesn't.
-    /// Blocked, it only closes.
+    /// What the action will do and its question: yes runs it, no or Esc
+    /// doesn't. Blocked, it only closes.
     Confirm {
         title: String,
         lines: Vec<String>,
         blocked: bool,
         action: Action,
+        /// The field on: yes or no.
+        yes: bool,
+    },
+    /// Before `wt start <key>`: it creates a note, a worktree and an agent.
+    Start {
+        key: String,
+        summary: String,
+        yes: bool,
     },
     /// A command running, then finished: what it said, and what it asks.
     Report(Report),
@@ -194,6 +202,14 @@ impl Action {
         (lines, true)
     }
 
+    /// The field the choice starts on: no when something is lost.
+    fn starts_on_yes(&self) -> bool {
+        match self {
+            Action::DoneTask(plan) => !plan.loses_changes(),
+            Action::DoneTree(..) => true,
+        }
+    }
+
     fn run(self, config: &Config, ui: &mut dyn Ui) -> Result<(), String> {
         let say = &mut |line| ui.say(line);
         match self {
@@ -275,6 +291,7 @@ impl App {
                     title: action.title(),
                     lines,
                     blocked,
+                    yes: action.starts_on_yes(),
                     action,
                 });
             }
@@ -339,18 +356,47 @@ impl App {
     }
 
     pub(super) fn on_dialog_key(&mut self, key: KeyEvent) {
-        let close = matches!(key.code, KeyCode::Esc | KeyCode::Char('n' | 'q'));
+        let close = matches!(key.code, KeyCode::Esc | KeyCode::Char('q'));
         match self.dialog.take() {
             Some(Dialog::Checking(_)) if close => {}
+            Some(Dialog::Confirm { .. }) if close => {}
             Some(Dialog::Confirm {
                 title,
+                lines,
                 blocked: false,
                 action,
-                ..
-            }) if key.code == KeyCode::Char('y') => {
-                self.run_command(title, Then::Show, move |config, ui| action.run(config, ui))
-            }
-            Some(Dialog::Confirm { .. }) if close => {}
+                mut yes,
+            }) => match choose(&mut yes, key.code) {
+                Some(true) => {
+                    self.run_command(title, Then::Show, move |config, ui| action.run(config, ui))
+                }
+                Some(false) => {}
+                None => {
+                    self.dialog = Some(Dialog::Confirm {
+                        title,
+                        lines,
+                        blocked: false,
+                        action,
+                        yes,
+                    })
+                }
+            },
+            Some(Dialog::Start { .. }) if close => {}
+            Some(Dialog::Start {
+                key: ticket,
+                summary,
+                mut yes,
+            }) => match choose(&mut yes, key.code) {
+                Some(true) => self.start_work(ticket),
+                Some(false) => {}
+                None => {
+                    self.dialog = Some(Dialog::Start {
+                        key: ticket,
+                        summary,
+                        yes,
+                    })
+                }
+            },
             Some(Dialog::Hide { selected }) => self.on_hide_key(key, selected),
             Some(Dialog::Report(mut report)) => {
                 if report.question.is_some() {
@@ -386,15 +432,27 @@ impl App {
                 title,
                 lines,
                 blocked,
+                yes,
                 ..
-            } => (
-                title,
-                lines.iter().map(line).collect(),
+            } => {
+                let mut text: Vec<Line> = lines.iter().map(line).collect();
                 if *blocked {
-                    "Esc close"
+                    (title.as_str(), text, "Esc close")
                 } else {
-                    "y yes   n no"
-                },
+                    text.push(Line::raw(""));
+                    text.push(choice_line(*yes));
+                    (title.as_str(), text, CHOICE_HINT)
+                }
+            }
+            Dialog::Start { key, summary, yes } => (
+                "start a task",
+                vec![
+                    Line::raw(format!("{key} «{summary}»")),
+                    Line::raw("a note, a worktree and an agent for it"),
+                    Line::raw(""),
+                    choice_line(*yes),
+                ],
+                CHOICE_HINT,
             ),
             Dialog::Report(report) => {
                 let mut text: Vec<Line> = report.lines.iter().map(line).collect();
@@ -404,7 +462,7 @@ impl App {
                         if question.is_text() {
                             "type   ⏎ ok   Esc cancel"
                         } else if question.items.is_empty() {
-                            "y yes   n no   Esc cancel"
+                            CHOICE_HINT
                         } else {
                             "type to filter   ↑↓ move   ⏎ pick   Esc cancel"
                         }
@@ -501,12 +559,14 @@ fn answer(report: &mut Report, key: KeyEvent) {
         return;
     }
     let reply = if question.items.is_empty() {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => Some(Some(0)),
-            KeyCode::Char('n') => Some(Some(1)),
+        // `selected`: 0 yes, 1 no
+        let mut yes = question.selected == 0;
+        let picked = match key.code {
             KeyCode::Esc => Some(None),
-            _ => None,
-        }
+            code => choose(&mut yes, code).map(|yes| Some(if yes { 0 } else { 1 })),
+        };
+        question.selected = if yes { 0 } else { 1 };
+        picked
     } else {
         let shown = question.shown();
         match key.code {
@@ -548,6 +608,50 @@ fn answer(report: &mut Report, key: KeyEvent) {
     }
 }
 
+/// The hint under a yes/no choice.
+const CHOICE_HINT: &str = "←→ choose   ⏎ ok   Esc cancel";
+
+/// A key on a yes/no choice, `yes` the field it is on: the answer once picked.
+/// The arrows, Tab and h l move; ⏎ picks the field, y and n pick at once.
+fn choose(yes: &mut bool, code: KeyCode) -> Option<bool> {
+    match code {
+        KeyCode::Char('y') => Some(true),
+        KeyCode::Char('n') => Some(false),
+        KeyCode::Enter => Some(*yes),
+        KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Tab
+        | KeyCode::BackTab
+        | KeyCode::Char('h' | 'l') => {
+            *yes = !*yes;
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The two fields, the one the choice is on lit.
+fn choice_line(yes: bool) -> Line<'static> {
+    let field = |label: &str, on: bool| {
+        if on {
+            Span::styled(
+                format!("[ {label} ]"),
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!("  {label}  "), Style::default().fg(Color::DarkGray))
+        }
+    };
+    Line::from(vec![
+        Span::raw("  "),
+        field("yes", yes),
+        Span::raw("   "),
+        field("no", !yes),
+    ])
+}
+
 /// How many items of a pick show at once.
 const PICK_ROWS: usize = 12;
 
@@ -560,10 +664,14 @@ fn question_lines(question: &Question) -> Vec<Line<'static>> {
         ])];
     }
     if question.items.is_empty() {
-        return vec![Line::from(Span::styled(
-            format!("{}?", question.prompt.trim_end_matches('?')),
-            yellow,
-        ))];
+        return vec![
+            Line::from(Span::styled(
+                format!("{}?", question.prompt.trim_end_matches('?')),
+                yellow,
+            )),
+            Line::raw(""),
+            choice_line(question.selected == 0),
+        ];
     }
     let mut lines = vec![Line::from(vec![
         Span::styled(format!("{}: ", question.prompt), yellow),
@@ -645,5 +753,21 @@ mod tests {
         press(&mut report, KeyCode::Esc);
         assert_eq!(rx.recv().unwrap(), None);
         assert!(report.cancelled);
+    }
+
+    #[test]
+    fn yes_or_no_is_picked_from_two_fields() {
+        let (tx, rx) = channel();
+        let mut report = report(Reply::Pick(tx));
+        // starts on yes; → moves to no, ⏎ picks it
+        press(&mut report, KeyCode::Right);
+        assert!(report.question.is_some());
+        press(&mut report, KeyCode::Enter);
+        assert_eq!(rx.recv().unwrap(), Some(1));
+
+        let (tx, rx) = channel();
+        let mut report = super::tests::report(Reply::Pick(tx));
+        press(&mut report, KeyCode::Char('y'));
+        assert_eq!(rx.recv().unwrap(), Some(0));
     }
 }

@@ -182,7 +182,7 @@ pub(super) fn lines(form: &Form) -> Vec<Line<'static>> {
     let label = |field: Field, text: &str| {
         let on = form.field == field;
         Span::styled(
-            format!("{}{text:<8}", if on { "› " } else { "  " }),
+            format!("{}{text:<10}", if on { "› " } else { "  " }),
             if on {
                 Style::default().fg(Color::Yellow)
             } else {

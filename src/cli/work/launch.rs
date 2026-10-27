@@ -27,6 +27,13 @@ pub(super) fn launch(
     open_agent(space, cwd, label, &args, focus, ui)
 }
 
+/// How `open_work` opens the worktree: with claude or a shell only, and
+/// whether its tab is focused.
+pub(super) struct Open {
+    pub(super) agent: bool,
+    pub(super) focus: bool,
+}
+
 /// What `wt prepare` does in the new tab, handed over in a file.
 #[derive(Serialize, Deserialize)]
 struct PrepareSpec {
@@ -36,7 +43,8 @@ struct PrepareSpec {
     brief: String,
     note: Option<PathBuf>,
     pane: String,
-    agent: String,
+    /// The claude to start once the worktree is ready; none, a shell only.
+    agent: Option<String>,
 }
 
 /// A tab for the worktree `name` in the task's herdr workspace. Fetch and
@@ -50,26 +58,29 @@ pub(super) fn open_work(
     name: &str,
     branch: &str,
     brief: String,
-    focus: bool,
+    open: Open,
     ui: &mut dyn Ui,
 ) -> Result<(), String> {
+    let Open { agent, focus } = open;
     let (space, note) = (task.name.as_str(), Some(task.note.path.as_path()));
     let dir = worktree::worktree_dir(main, name);
     if !herdr::available() {
         let dir = worktree::create_worktree(main, name, branch).map_err(err)?;
         ui.say(format!("worktree: {} ({branch})", dir.display()));
         let brief = write_brief(&dir, &brief)?;
-        let prompt = agent_prompt(note, &brief).unwrap_or_default();
-        ui.say(format!(
-            "not in herdr — run it yourself: cd {} && claude '{prompt}'",
-            dir.display()
-        ));
+        if agent {
+            let prompt = agent_prompt(note, &brief).unwrap_or_default();
+            ui.say(format!(
+                "not in herdr — run it yourself: cd {} && claude '{prompt}'",
+                dir.display()
+            ));
+        }
         return Ok(());
     }
 
     let cwd = if dir.exists() { &dir } else { main };
     let (tab, pane) = open_tab(space, cwd, name)?;
-    let agent = free_agent_name(name);
+    let agent = agent.then(|| free_agent_name(name));
     let spec = PrepareSpec {
         main: main.to_path_buf(),
         name: name.to_string(),
@@ -88,39 +99,30 @@ pub(super) fn open_work(
 
     let exe = std::env::current_exe().map_err(err)?;
     let prompt = prompt_path(&spec_path);
-    let command = format!(
-        "{} prepare {spec} && cd {dir} && command claude \"$(cat {prompt}; rm -f {prompt})\"",
+    let mut command = format!(
+        "{} prepare {spec} && cd {dir}",
         shell_quote(&exe.to_string_lossy()),
         spec = shell_quote(&spec_path.to_string_lossy()),
         dir = shell_quote(&dir.to_string_lossy()),
-        prompt = shell_quote(&prompt.to_string_lossy()),
     );
+    if agent.is_some() {
+        command.push_str(&format!(
+            " && command claude \"$(cat {prompt}; rm -f {prompt})\"",
+            prompt = shell_quote(&prompt.to_string_lossy()),
+        ));
+    }
     herdr::run_in_pane(&pane, &command).map_err(err)?;
     if focus {
         let _ = herdr::focus_tab(&tab);
     }
-    ui.say(format!(
-        "tab {name} → workspace \"{space}\": the worktree ({branch}) is being prepared there, then claude {agent} starts"
-    ));
-    Ok(())
-}
-
-/// The task's herdr workspace with a shell in `cwd`, no worktree or agent.
-pub(super) fn open_space(
-    task: &Task,
-    cwd: &Path,
-    focus: bool,
-    ui: &mut dyn Ui,
-) -> Result<(), String> {
-    if !herdr::available() {
-        ui.say("not in herdr — no workspace".to_string());
-        return Ok(());
-    }
-    let (tab, _) = herdr::create_workspace(&task.name, cwd).map_err(err)?;
-    if focus {
-        let _ = herdr::focus_tab(&tab);
-    }
-    ui.say(format!("workspace \"{}\"", task.name));
+    ui.say(match &agent {
+        Some(agent) => format!(
+            "tab {name} → workspace \"{space}\": the worktree ({branch}) is being prepared there, then claude {agent} starts"
+        ),
+        None => format!(
+            "tab {name} → workspace \"{space}\": the worktree ({branch}) is being prepared there"
+        ),
+    });
     Ok(())
 }
 
@@ -149,6 +151,11 @@ pub(in crate::cli) fn cli_prepare(spec_path: &Path) -> Result<(), String> {
         worktree::copy_worktree_includes(&spec.main, &dir);
     }
     let brief = write_brief(&dir, &spec.brief)?;
+    let _ = std::fs::remove_file(spec_path);
+    let Some(agent) = &spec.agent else {
+        println!("ready in {:.0} s", started.elapsed().as_secs_f64());
+        return Ok(());
+    };
     println!(
         "ready in {:.0} s, starting claude",
         started.elapsed().as_secs_f64()
@@ -158,8 +165,7 @@ pub(in crate::cli) fn cli_prepare(spec_path: &Path) -> Result<(), String> {
     // of the pane's shell, which would otherwise stay in the main checkout
     let prompt = agent_prompt(spec.note.as_deref(), &brief).unwrap_or_default();
     std::fs::write(prompt_path(spec_path), prompt).map_err(err)?;
-    let _ = std::fs::remove_file(spec_path);
-    let _ = herdr::name_agent_when_up(&spec.pane, &spec.agent);
+    let _ = herdr::name_agent_when_up(&spec.pane, agent);
     Ok(())
 }
 

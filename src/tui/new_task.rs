@@ -1,10 +1,10 @@
 //! "+ new task": a form for `wt start` — the name, a Jira ticket (none, an
-//! existing one, a new one) and what to create.
+//! existing one, a new one), whether to make a worktree and an agent.
 
 use super::App;
 use super::dialog::{Dialog, Then};
+use crate::cli::StartArgs;
 use crate::cli::work;
-use crate::cli::{Only, StartArgs};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -17,18 +17,12 @@ enum Jira {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Create {
-    Note,
-    Workspace,
-    Full,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum Field {
     Name,
     Jira,
     Key,
-    Create,
+    Worktree,
+    Agent,
 }
 
 const JIRA: [(Jira, &str); 3] = [
@@ -37,17 +31,14 @@ const JIRA: [(Jira, &str); 3] = [
     (Jira::New, "new"),
 ];
 
-const CREATE: [(Create, &str); 3] = [
-    (Create::Note, "note"),
-    (Create::Workspace, "+ workspace"),
-    (Create::Full, "+ worktree, claude"),
-];
+const YES_NO: [(bool, &str); 2] = [(true, "yes"), (false, "no")];
 
 pub(super) struct Form {
     name: String,
     jira: Jira,
     key: String,
-    create: Create,
+    worktree: bool,
+    agent: bool,
     field: Field,
     /// The project has Jira: else no ticket fields.
     has_jira: bool,
@@ -61,7 +52,8 @@ impl Form {
             name: String::new(),
             jira: Jira::None,
             key: String::new(),
-            create: Create::Full,
+            worktree: true,
+            agent: true,
             field: Field::Name,
             has_jira,
             error: None,
@@ -78,7 +70,7 @@ impl Form {
         if self.jira == Jira::Existing {
             fields.push(Field::Key);
         }
-        fields.push(Field::Create);
+        fields.extend([Field::Worktree, Field::Agent]);
         fields
     }
 
@@ -96,7 +88,8 @@ impl Form {
         }
         match self.field {
             Field::Jira => self.jira = next(&JIRA, self.jira, delta),
-            Field::Create => self.create = next(&CREATE, self.create, delta),
+            Field::Worktree => self.worktree = next(&YES_NO, self.worktree, delta),
+            Field::Agent => self.agent = next(&YES_NO, self.agent, delta),
             Field::Name | Field::Key => {}
         }
     }
@@ -105,7 +98,7 @@ impl Form {
         match self.field {
             Field::Name => Some(&mut self.name),
             Field::Key => Some(&mut self.key),
-            Field::Jira | Field::Create => None,
+            Field::Jira | Field::Worktree | Field::Agent => None,
         }
     }
 
@@ -114,11 +107,6 @@ impl Form {
     fn args(&self) -> Result<StartArgs, String> {
         let name = self.name.trim().to_string();
         let key = self.key.trim().to_uppercase();
-        let only = match self.create {
-            Create::Note => Some(Only::Note),
-            Create::Workspace => Some(Only::Workspace),
-            Create::Full => None,
-        };
         let (target, tickets) = match self.jira {
             Jira::Existing if !work::is_ticket_key(&key) => {
                 return Err("the ticket's key, like UCP-12345".to_string());
@@ -132,7 +120,8 @@ impl Form {
             target: Some(target),
             tickets,
             new_ticket: self.jira == Jira::New,
-            only,
+            no_worktree: !self.worktree,
+            no_agent: !self.agent,
             ..StartArgs::default()
         })
     }
@@ -153,7 +142,7 @@ impl App {
             KeyCode::Enter => match form.args() {
                 Ok(args) => {
                     let target = args.target.clone().unwrap_or_default();
-                    let then = if args.only == Some(Only::Note) {
+                    let then = if args.no_worktree && args.no_agent {
                         Then::Close
                     } else {
                         Then::Navigate
@@ -231,7 +220,8 @@ pub(super) fn lines(form: &Form) -> Vec<Line<'static>> {
             Field::Name => vec![label(field, "name")],
             Field::Jira => vec![label(field, "jira")],
             Field::Key => vec![label(field, "ticket")],
-            Field::Create => vec![label(field, "create")],
+            Field::Worktree => vec![label(field, "worktree")],
+            Field::Agent => vec![label(field, "agent")],
         };
         spans.extend(match field {
             Field::Name => {
@@ -244,22 +234,23 @@ pub(super) fn lines(form: &Form) -> Vec<Line<'static>> {
             }
             Field::Jira => choice(JIRA.iter().map(|(j, t)| (*t, *j == form.jira)).collect()),
             Field::Key => text(field, &form.key, "UCP-12345"),
-            Field::Create => choice(
-                CREATE
+            Field::Worktree => choice(
+                YES_NO
                     .iter()
-                    .map(|(c, t)| (*t, *c == form.create))
+                    .map(|(v, t)| (*t, *v == form.worktree))
                     .collect(),
             ),
+            Field::Agent => choice(YES_NO.iter().map(|(v, t)| (*t, *v == form.agent)).collect()),
         });
         lines.push(Line::from(spans));
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        match (form.jira, form.create) {
-            (Jira::New, _) => "a Jira ticket with this name, assigned to me",
-            (_, Create::Note) => "only the task note",
-            (_, Create::Workspace) => "the note and a herdr workspace",
-            (_, Create::Full) => "the note, a herdr workspace, a worktree tab with claude",
+        match (form.worktree, form.agent) {
+            (true, true) => "the note, a worktree tab with claude in the task's workspace",
+            (true, false) => "the note, a worktree tab with a shell in the task's workspace",
+            (false, true) => "the note, claude in the main checkout in the task's workspace",
+            (false, false) => "only the task note",
         },
         dim,
     ));
@@ -282,11 +273,11 @@ mod tests {
         assert!(form.args().is_err());
         form.jira = Jira::Existing;
         form.key = "ucp-1".into();
-        form.create = Create::Note;
+        form.worktree = false;
         let args = form.args().unwrap();
         assert_eq!(args.target.as_deref(), Some("UCP-1"));
         assert!(args.tickets.is_empty());
-        assert_eq!(args.only, Some(Only::Note));
+        assert!(args.no_worktree && !args.no_agent);
 
         form.name = "video".into();
         let args = form.args().unwrap();
@@ -299,7 +290,7 @@ mod tests {
         let mut form = Form::new(true);
         form.field = Field::Jira;
         form.move_field(1);
-        assert!(form.field == Field::Create);
+        assert!(form.field == Field::Worktree);
         form.field = Field::Jira;
         form.turn(1);
         form.move_field(1);

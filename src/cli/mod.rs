@@ -92,17 +92,13 @@ pub(crate) struct StartArgs {
     /// (the project's `jira.project`, `jira.issue_type`)
     #[arg(long)]
     pub(crate) new_ticket: bool,
-    /// Create only the note, or the note and the herdr workspace; default: also
-    /// the worktree tab with claude
-    #[arg(long, value_enum)]
-    pub(crate) only: Option<Only>,
-}
-
-/// What `wt start --only` creates.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Only {
-    Note,
-    Workspace,
+    /// No worktree: the agent works in the main checkout
+    #[arg(long)]
+    pub(crate) no_worktree: bool,
+    /// No claude: the worktree tab gets a shell. With --no-worktree too, only
+    /// the note
+    #[arg(long)]
+    pub(crate) no_agent: bool,
 }
 
 #[derive(Args, Debug, Default)]

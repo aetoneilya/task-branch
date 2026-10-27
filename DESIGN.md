@@ -192,7 +192,7 @@ wt select [<task | KEY>]    go back to existing work
 wt status                   the table in plain text
 ```
 
-### `wt start <task name | KEY> [-k KEY]... [-t tag]... [-m text] [-n name] [-b branch] [--bg] [--new-ticket] [--only note|workspace]`
+### `wt start <task name | KEY> [-k KEY]... [-t tag]... [-m text] [-n name] [-b branch] [--bg] [--new-ticket] [--no-worktree] [--no-agent]`
 
 - **A ticket key** (`UCP-12345`) — a new task named after the ticket's summary
   (characters a file name can't hold dropped), with that ticket: the same as
@@ -207,8 +207,9 @@ wt status                   the table in plain text
   tags/title and asks whether one of them was meant.
 - **`--new-ticket`** — first creates a Jira ticket named after the task, assigned
   to me, in the project's `jira.project` with `jira.issue_type`; it becomes the first ticket.
-- **`--only note`** creates just the note, **`--only workspace`** the note and
-  the herdr workspace with a shell in the repo — no worktree, no agent.
+- **`--no-worktree`** — claude runs in the main checkout, in a tab of the task's
+  workspace, its brief in worktable's cache. **`--no-agent`** — the worktree tab
+  gets a shell, no claude. Both: only the note.
 - **No argument** — fuzzy picker over my open Jira tickets not in any task, plus
   "new task…".
 
@@ -325,7 +326,7 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 | `w` | — | next agent waiting for me |
 | `v` | — | what kinds of rows to show |
 | `p` | — | details pane on/off (hidden under 110 columns) |
-| `⏎`, click | "+ new task" row above the tasks | a form for `wt start`: name; Jira none / existing key / new ticket; create the note only, + workspace, or + worktree and claude |
+| `⏎`, click | "+ new task" row above the tasks | a form for `wt start`: name; Jira none / existing key / new ticket; worktree yes/no; agent yes/no (neither: only the note); no Jira fields in a project without Jira |
 | `c` | task, ticket | `wt select --session` |
 | `R`, `d` | worktree | `wt review`, `wt done` |
 | `d` | task | `wt done "<task>"`: close it with its Jira tickets |

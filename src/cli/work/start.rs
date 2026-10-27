@@ -5,8 +5,8 @@ use super::common::{
     Terminal, Ui, branch_name, choose_repo, err, fetch_issue, find_task, is_ticket_key, list,
     name_from_issue, name_from_text, resolve_task,
 };
-use super::launch::{open_space, open_work};
-use crate::cli::{AddArgs, Only, StartArgs, load};
+use super::launch::{Open, launch, open_work};
+use crate::cli::{AddArgs, StartArgs, load};
 use crate::client::jira::JiraIssue;
 use crate::client::worktree;
 use crate::config::Config;
@@ -83,7 +83,8 @@ fn start_with(
         branch,
         bg,
         new_ticket,
-        only,
+        no_worktree,
+        no_agent,
         ..
     } = args;
     let similar = similar_tasks(&tasks, &target, &tags);
@@ -95,15 +96,14 @@ fn start_with(
     }
 
     let mut keys: Vec<String> = tickets.iter().flat_map(|t| ticket_keys(t)).collect();
-    // before anything is created: a full start can still fail on the name
-    let tree_name = match (only, name) {
-        (Some(_), _) => None,
-        (None, Some(name)) => Some(name),
-        (None, None) if keys.is_empty() && !new_ticket => Some(
+    // before anything is created: a worktree can still fail on the name
+    let tree_name = match name {
+        Some(name) => Some(name),
+        None if !no_worktree && keys.is_empty() && !new_ticket => Some(
             name_from_text(&target)
                 .ok_or("no latin worktree name comes out of the title — give one with -n")?,
         ),
-        (None, None) => None,
+        None => None,
     };
     if new_ticket {
         let key = create_ticket(config, &target)?;
@@ -131,20 +131,51 @@ fn start_with(
     let note = Note::create(&path, &frontmatter, &body).map_err(err)?;
     let task = Task::from_note(note);
     ui.say(format!("note: {}", path.display()));
-    match only {
-        Some(Only::Note) => return Ok(()),
-        Some(Only::Workspace) => return open_space(&task, &choose_repo(config, ui)?, !bg, ui),
-        None => {}
+    if no_worktree && no_agent {
+        return Ok(());
     }
 
     let issue = keys.first().map(|k| fetch_issue(config, k)).transpose()?;
+    let main = choose_repo(config, ui)?;
+    if no_worktree {
+        // claude in the main checkout, its brief in worktable's cache
+        let label = tree_name
+            .or_else(|| issue.as_ref().map(name_from_issue))
+            .or_else(|| name_from_text(&target))
+            .unwrap_or_else(|| "agent".to_string());
+        let branch = worktree::current_branch(&main).unwrap_or_default();
+        let text = brief_text(
+            &main,
+            &branch,
+            Some(&task),
+            issue.as_ref(),
+            &keys,
+            message.as_deref(),
+        );
+        let brief = crate::config::cache_dir()
+            .join("briefs")
+            .join(format!("{}.md", task.name.replace('/', "-")));
+        if let Some(dir) = brief.parent() {
+            std::fs::create_dir_all(dir).map_err(err)?;
+        }
+        std::fs::write(&brief, text).map_err(err)?;
+        return launch(
+            &task.name,
+            &main,
+            &label,
+            Some(&task.note.path),
+            &brief,
+            !bg,
+            ui,
+        );
+    }
+
     let wt_name = match (tree_name, &issue) {
         (Some(name), _) => name,
         (None, Some(issue)) => name_from_issue(issue),
         (None, None) => unreachable!("a name without tickets is checked above"),
     };
     let branch = branch.unwrap_or_else(|| branch_name(config, keys.first(), &wt_name));
-    let main = choose_repo(config, ui)?;
     let tree = worktree::worktree_dir(&main, &wt_name);
     let brief = brief_text(
         &tree,
@@ -154,10 +185,14 @@ fn start_with(
         &keys,
         message.as_deref(),
     );
-    open_work(&task, &main, &wt_name, &branch, brief, !bg, ui)
+    let open = Open {
+        agent: !no_agent,
+        focus: !bg,
+    };
+    open_work(&task, &main, &wt_name, &branch, brief, open, ui)
 }
 
-/// A ticket for task `title` in `[jira] project`, assigned to me.
+/// A ticket for task `title` in the project's Jira, assigned to me.
 fn create_ticket(config: &Config, title: &str) -> Result<String, String> {
     let client = config.jira_client()?;
     let jira = config.jira.as_ref().ok_or("no Jira")?;
@@ -242,7 +277,11 @@ fn add_with(
         &task.tickets,
         message.as_deref(),
     );
-    open_work(&task, &main, &wt_name, &branch, brief, !bg, ui)
+    let open = Open {
+        agent: true,
+        focus: !bg,
+    };
+    open_work(&task, &main, &wt_name, &branch, brief, open, ui)
 }
 
 /// My open Jira tickets that belong to no task, plus "new task…".

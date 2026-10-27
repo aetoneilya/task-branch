@@ -1,5 +1,5 @@
 //! `v`: which kinds of rows the tree shows. Each toggle applies at once and is
-//! kept for the next run.
+//! kept for the next run, as is the project last shown.
 
 use super::App;
 use super::dialog::Dialog;
@@ -23,29 +23,29 @@ const ITEMS: [(&str, Flag); 3] = [
 /// What the TUI keeps between runs.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
-struct Saved {
-    hide: Hide,
+pub(super) struct Saved {
+    pub(super) hide: Hide,
+    pub(super) project: Option<String>,
 }
 
 fn path() -> PathBuf {
     crate::config::cache_dir().join("tui.json")
 }
 
-/// The last run's choice; none if never saved or unreadable.
-pub(super) fn load() -> Hide {
+/// The last run's choices; none if never saved or unreadable.
+pub(super) fn load() -> Saved {
     std::fs::read_to_string(path())
         .ok()
         .and_then(|s| serde_json::from_str::<Saved>(&s).ok())
         .unwrap_or_default()
-        .hide
 }
 
-fn save(hide: Hide) -> Result<(), String> {
+fn save(saved: &Saved) -> Result<(), String> {
     let path = path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let json = serde_json::to_string_pretty(&Saved { hide }).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(saved).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| format!("can't save {}: {e}", path.display()))
 }
 
@@ -85,7 +85,16 @@ impl App {
         let flag = ITEMS[index].1(&mut self.hide);
         *flag = !*flag;
         self.rebuild();
-        if let Err(e) = save(self.hide) {
+        self.save_state();
+    }
+
+    /// Keeps the hidden kinds and the project for the next run.
+    pub(super) fn save_state(&mut self) {
+        let saved = Saved {
+            hide: self.hide,
+            project: Some(self.config.name.clone()),
+        };
+        if let Err(e) = save(&saved) {
             self.say(format!("! {e}"));
         }
     }

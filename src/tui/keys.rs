@@ -55,6 +55,8 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.select(usize::MAX),
             KeyCode::Char(' ') => self.toggle_fold(),
             KeyCode::Char('z') => self.fold_all(),
+            KeyCode::Char(']') | KeyCode::Tab => self.step_project(1),
+            KeyCode::Char('[') | KeyCode::BackTab => self.step_project(-1),
             KeyCode::Left | KeyCode::Char('h') => self.fold_or_parent(),
             KeyCode::Right | KeyCode::Char('l') => self.unfold(),
             KeyCode::Char('/') => self.prompt = Some((Prompt::Filter, self.filter.clone())),

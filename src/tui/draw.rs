@@ -216,6 +216,19 @@ impl App {
         Line::from(spans)
     }
 
+    /// The project tab under column `x` of the header.
+    pub(super) fn tab_at(&self, x: u16) -> Option<usize> {
+        let mut end = 0;
+        for (i, project) in self.projects.iter().enumerate() {
+            // " name " and the "│" before all but the first
+            end += project.name.chars().count() as u16 + 2 + (i > 0) as u16;
+            if x < end {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     fn header(&self) -> Paragraph<'static> {
         // roots per section: tasks until the first title, then each section
         let mut counts = [0usize; 3];
@@ -228,17 +241,34 @@ impl App {
                 _ => counts[section] += 1,
             }
         }
-        let mut spans = vec![
-            Span::styled(" worktable ", Style::default().add_modifier(Modifier::BOLD)),
+        let mut spans = Vec::new();
+        for (i, name) in self.projects.iter().map(|p| &p.name).enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+            }
+            spans.push(if i == self.project {
+                Span::styled(
+                    format!(" {name} "),
+                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+                )
+            } else {
+                Span::styled(format!(" {name} "), Style::default().fg(Color::DarkGray))
+            });
+        }
+        spans.extend([
             Span::styled(
-                format!(
-                    " {} task(s) · {} without a task · {} assigned to me",
-                    counts[0], counts[1], counts[2]
-                ),
+                if self.config.jira.is_some() {
+                    format!(
+                        "  {} task(s) · {} without a task · {} assigned to me",
+                        counts[0], counts[1], counts[2]
+                    )
+                } else {
+                    format!("  {} task(s) · {} without a task", counts[0], counts[1])
+                },
                 Style::default().fg(Color::DarkGray),
             ),
             Span::raw("   "),
-        ];
+        ]);
         let waiting = self.waiting().len();
         if waiting > 0 {
             spans.push(Span::styled(
@@ -272,7 +302,8 @@ impl App {
         } else {
             Span::raw("")
         });
-        if !self.online {
+        let remote = self.config.jira.is_some() || self.config.gitlab.is_some();
+        if !self.online && remote {
             let cached = !self.table.tickets.is_empty() || !self.table.mrs.is_empty();
             spans.push(Span::styled(
                 if cached {

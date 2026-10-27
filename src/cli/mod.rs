@@ -2,7 +2,7 @@ mod progress;
 mod table;
 pub(crate) mod work;
 
-use crate::config::{Config, load_config};
+use crate::config::{Config, choose_project, load_projects, project_of};
 use crate::vault::task::Task;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -13,6 +13,9 @@ use std::path::PathBuf;
 #[command(name = "wt", author, version, long_about = None)]
 /// Tasks, Jira tickets, merge requests and worktrees in one table
 pub struct Cli {
+    /// The project; default: the one the current directory is in, else the first
+    #[arg(long, short = 'p', global = true)]
+    project: Option<String>,
     /// Without a command: the TUI
     #[command(subcommand)]
     command: Option<CliCommands>,
@@ -86,7 +89,7 @@ pub(crate) struct StartArgs {
     #[arg(long)]
     pub(crate) bg: bool,
     /// Create a Jira ticket named after the task, assigned to me
-    /// (`[jira] project`, `issue_type`)
+    /// (the project's `jira.project`, `jira.issue_type`)
     #[arg(long)]
     pub(crate) new_ticket: bool,
     /// Create only the note, or the note and the herdr workspace; default: also
@@ -162,11 +165,21 @@ struct DoneArgs {
 
 pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
-    let config = load_config().map_err(|err| err.to_string())?;
+    let mut projects = load_projects().map_err(|err| err.to_string())?;
+    let cwd = std::env::current_dir().ok();
     let command = match cli.command {
-        None | Some(CliCommands::Tui {}) => return crate::tui::run(config),
+        None | Some(CliCommands::Tui {}) => {
+            // the TUI opens on the last project it showed, unless told or in one
+            let start = match &cli.project {
+                Some(name) => Some(choose_project(&projects, Some(name), None)?),
+                None => cwd.as_deref().and_then(|d| project_of(&projects, d)),
+            };
+            return crate::tui::run(projects, start);
+        }
         Some(command) => command,
     };
+    let chosen = choose_project(&projects, cli.project.as_deref(), cwd.as_deref())?;
+    let config = projects.swap_remove(chosen);
     match command {
         CliCommands::Status(args) => table::cli_status(&config, args),
         CliCommands::Start(args) => work::cli_start(&config, args),

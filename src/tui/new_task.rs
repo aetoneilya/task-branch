@@ -49,25 +49,32 @@ pub(super) struct Form {
     key: String,
     create: Create,
     field: Field,
+    /// The project has Jira: else no ticket fields.
+    has_jira: bool,
     /// Why the last ⏎ did not start it.
     error: Option<String>,
 }
 
 impl Form {
-    fn new() -> Form {
+    fn new(has_jira: bool) -> Form {
         Form {
             name: String::new(),
             jira: Jira::None,
             key: String::new(),
             create: Create::Full,
             field: Field::Name,
+            has_jira,
             error: None,
         }
     }
 
-    /// The fields shown: the ticket key only for an existing ticket.
+    /// The fields shown: the ticket key only for an existing ticket, neither
+    /// without Jira.
     fn fields(&self) -> Vec<Field> {
-        let mut fields = vec![Field::Name, Field::Jira];
+        let mut fields = vec![Field::Name];
+        if self.has_jira {
+            fields.push(Field::Jira);
+        }
         if self.jira == Jira::Existing {
             fields.push(Field::Key);
         }
@@ -133,7 +140,8 @@ impl Form {
 
 impl App {
     pub(super) fn open_new_task(&mut self) {
-        self.dialog = Some(Dialog::NewTask(Form::new()));
+        let has_jira = self.config.jira.is_some();
+        self.dialog = Some(Dialog::NewTask(Form::new(has_jira)));
     }
 
     /// ↑↓ and Tab move between fields, ←→ choose, typing fills the text
@@ -270,7 +278,7 @@ mod tests {
 
     #[test]
     fn an_existing_ticket_without_a_name_names_the_task() {
-        let mut form = Form::new();
+        let mut form = Form::new(true);
         assert!(form.args().is_err());
         form.jira = Jira::Existing;
         form.key = "ucp-1".into();
@@ -288,7 +296,7 @@ mod tests {
 
     #[test]
     fn the_key_field_shows_only_for_an_existing_ticket() {
-        let mut form = Form::new();
+        let mut form = Form::new(true);
         form.field = Field::Jira;
         form.move_field(1);
         assert!(form.field == Field::Create);

@@ -20,29 +20,37 @@ cargo install --path . --locked
 the path in `WORKTABLE_CONFIG`):
 
 ```toml
-[jira]
-host = "https://jira.vk.team"
-project = "UCP"            # where wt start --new-ticket creates tickets
-issue_type = "Задача"       # their type as the project names it (default Task)
-
-[gitlab]
-host = "gitlab.corp.mail.ru"
-project = "ai/ucp"
-
 [vault]
 path = "~/machrist-vault"
-task_dirs = ["30-work/tasks"]
-new_task_dir = "30-work/tasks"
 
-[[repo]]
-path = "~/code/vk/ucp"
-gitlab_project = "ai/ucp"
-
-[workflow]
+[workflow]                  # defaults for every project
 branch_prefix = "i.udalov/"
 # review_model = "claude-fable-5-1"
 # ide = "IntelliJ IDEA"
+
+[[project]]                 # a tab in the TUI, `wt -p ucp`
+name = "ucp"
+task_dirs = ["30-work/tasks"]
+# new_task_dir = "30-work/tasks"   # default: the first of task_dirs
+jira = { host = "https://jira.vk.team", project = "UCP", issue_type = "Задача" }
+gitlab = { host = "gitlab.corp.mail.ru", project = "ai/ucp" }
+
+[[project.repo]]
+path = "~/code/vk/ucp"
+gitlab_project = "ai/ucp"
+
+[[project]]                 # no Jira, no GitLab: notes, worktrees, agents
+name = "vpn"
+task_dirs = ["10-ah-fuck-life/projects/vpn"]
+branch_prefix = ""
+
+[[project.repo]]
+path = "~/code/pet-projects/vpn-bot"
 ```
+
+Commands work on one project: `-p <name>`, else the one whose repo the current
+directory is in, else the first. The TUI opens on the last one shown; `[` `]`,
+Tab or a click on its tab switch.
 
 Tokens come from `JIRA_TOKEN` and `GITLAB_TOKEN`. `WT_TRACE=1` prints how long
 each fetch, the matching and the rendering took to stderr.

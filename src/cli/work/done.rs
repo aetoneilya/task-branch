@@ -202,7 +202,7 @@ pub(crate) fn finish_task(
     let jira = if to_close.is_empty() {
         None
     } else {
-        Some(JiraClient::from_env(&config.jira.host)?)
+        Some(config.jira_client()?)
     };
 
     let mut problems = Vec::new();

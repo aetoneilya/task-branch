@@ -4,7 +4,6 @@ use super::{
     App, Update,
     rows::{self, AgentAt, Kind, dim, spans},
 };
-use crate::client::jira::JiraClient;
 use crate::client::{herdr, worktree};
 use crate::config::Config;
 use crate::table::look::{self, Piece, Tone, clean};
@@ -331,7 +330,8 @@ fn display_path(path: &Path) -> String {
 /// agent's recent screen.
 fn load_detail(config: &Config, detail: &Detail) -> String {
     match detail {
-        Detail::Description(key) => match JiraClient::from_env(&config.jira.host)
+        Detail::Description(key) => match config
+            .jira_client()
             .and_then(|c| c.get_issue_by_key(key).map_err(|e| e.to_string()))
         {
             Ok(issue) => issue

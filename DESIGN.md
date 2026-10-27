@@ -206,7 +206,7 @@ wt status                   the table in plain text
   and suggests `wt select` / `wt add`. Before creating, lists tasks with similar
   tags/title and asks whether one of them was meant.
 - **`--new-ticket`** — first creates a Jira ticket named after the task, assigned
-  to me, in `[jira] project` with `issue_type`; it becomes the first ticket.
+  to me, in the project's `jira.project` with `jira.issue_type`; it becomes the first ticket.
 - **`--only note`** creates just the note, **`--only workspace`** the note and
   the herdr workspace with a shell in the repo — no worktree, no agent.
 - **No argument** — fuzzy picker over my open Jira tickets not in any task, plus
@@ -350,29 +350,37 @@ Not yet: Review tab, editing tags.
 the path in `WORKTABLE_CONFIG`):
 
 ```toml
-[jira]
-host = "https://jira.vk.team"
-project = "UCP"            # where wt start --new-ticket creates tickets
-issue_type = "Задача"       # their type as the project names it (default Task)
-
-[gitlab]
-host = "gitlab.corp.mail.ru"
-project = "ai/ucp"          # used when no [[repo]] names a project
-
 [vault]
 path = "~/machrist-vault"
-task_dirs = ["30-work/tasks"]
-new_task_dir = "30-work/tasks"
 
-[[repo]]
+[workflow]                  # defaults for every project
+branch_prefix = "i.udalov/"
+# review_model = "claude-fable-5-1"
+# ide = "IntelliJ IDEA"
+
+[[project]]                 # a tab in the TUI, `wt -p ucp`
+name = "ucp"
+task_dirs = ["30-work/tasks"]
+# new_task_dir = "30-work/tasks"   # default: the first of task_dirs
+jira = { host = "https://jira.vk.team", project = "UCP", issue_type = "Задача" }
+gitlab = { host = "gitlab.corp.mail.ru", project = "ai/ucp" }
+
+[[project.repo]]
 path = "~/code/vk/ucp"
 gitlab_project = "ai/ucp"
 
-[workflow]
-branch_prefix = "i.udalov/"
-review_model = "claude-fable-5-1"   # optional: claude's default when unset
-ide = "IntelliJ IDEA"               # optional, the default
+[[project]]                 # no Jira, no GitLab: notes, worktrees, agents
+name = "vpn"
+task_dirs = ["10-ah-fuck-life/projects/vpn"]
+branch_prefix = ""
+
+[[project.repo]]
+path = "~/code/pet-projects/vpn-bot"
 ```
+
+Commands work on one project: `-p <name>`, else the one whose repo the current
+directory is in, else the first. The TUI opens on the last one shown; `[` `]`,
+Tab or a click on its tab switch.
 
 Multiple `[[repo]]` from day one: worktrees and MRs are collected per repo.
 Tokens stay in `JIRA_TOKEN` / `GITLAB_TOKEN`. `WT_TRACE=1` prints how long each

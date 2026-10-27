@@ -42,8 +42,9 @@ const MESSAGE_FOR: Duration = Duration::from_secs(4);
 /// Narrower than this, the details pane is hidden unless `p` asks for it.
 const PREVIEW_MIN_WIDTH: u16 = 110;
 
-pub fn run(config: Config) -> Result<(), String> {
-    let mut app = App::new(config)?;
+/// `start`: the project to show first; else the one shown last.
+pub fn run(projects: Vec<Config>, start: Option<usize>) -> Result<(), String> {
+    let mut app = App::new(projects, start)?;
     let mut terminal = init_terminal();
     let result = app.run(&mut terminal);
     restore_terminal();
@@ -71,7 +72,8 @@ enum Prompt {
 }
 
 enum Update {
-    Table(Box<Table>, Vec<String>),
+    /// A project's refreshed table, and the notes it updated.
+    Table(String, Box<Table>, Vec<String>),
     /// A lazily loaded detail.
     Detail(Detail, String),
     /// herdr's agents and tabs.
@@ -90,6 +92,9 @@ enum Update {
 }
 
 struct App {
+    projects: Vec<Arc<Config>>,
+    /// The project shown: its index in `projects`, its config.
+    project: usize,
     config: Arc<Config>,
     table: Table,
     online: bool,
@@ -135,13 +140,22 @@ struct App {
 }
 
 impl App {
-    fn new(config: Config) -> Result<App, String> {
-        let (tasks, skipped) = vault::task::load(&config)?;
-        let mut table = table::build_cached(&config, tasks);
-        report_skipped(&mut table, &skipped);
+    fn new(projects: Vec<Config>, start: Option<usize>) -> Result<App, String> {
+        let saved = hide::load();
+        let project = start
+            .or_else(|| {
+                let last = saved.project.as_deref()?;
+                projects.iter().position(|p| p.name == last)
+            })
+            .unwrap_or(0);
+        let projects: Vec<Arc<Config>> = projects.into_iter().map(Arc::new).collect();
+        let config = projects[project].clone();
+        let table = offline_table(&config)?;
         let (tx, rx) = channel();
         let mut app = App {
-            config: Arc::new(config),
+            projects,
+            project,
+            config,
             table,
             online: false,
             rows: Vec::new(),
@@ -149,7 +163,7 @@ impl App {
             selected: None,
             folded: HashSet::new(),
             all: false,
-            hide: hide::load(),
+            hide: saved.hide,
             filter: String::new(),
             prompt: None,
             dialog: None,
@@ -233,8 +247,44 @@ impl App {
             let mut table = table::build(&config, tasks, true);
             report_skipped(&mut table, &skipped);
             let updated = table::write_back(&mut table);
-            let _ = tx.send(Update::Table(Box::new(table), updated));
+            let project = config.name.clone();
+            let _ = tx.send(Update::Table(project, Box::new(table), updated));
         });
+    }
+
+    /// `[` `]`, Tab or a click on its tab: another project, shown at once from
+    /// what is on disk, then refreshed.
+    fn switch_project(&mut self, index: usize) {
+        if index == self.project || index >= self.projects.len() {
+            return;
+        }
+        let config = self.projects[index].clone();
+        let table = match offline_table(&config) {
+            Ok(table) => table,
+            Err(e) => {
+                self.say(format!("! {e}"));
+                return;
+            }
+        };
+        self.project = index;
+        self.config = config;
+        self.table = table;
+        self.online = false;
+        self.synced = None;
+        self.selected = None;
+        self.list.select(None);
+        self.filter.clear();
+        self.details.clear();
+        self.pending.clear();
+        self.rebuild();
+        self.save_state();
+        self.refresh();
+    }
+
+    /// The project `delta` tabs away, around.
+    fn step_project(&mut self, delta: isize) {
+        let n = self.projects.len() as isize;
+        self.switch_project((self.project as isize + delta).rem_euclid(n) as usize);
     }
 
     /// Something on screen moves: a refresh, a command, details loading, or an
@@ -311,7 +361,12 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Table(table, updated) => {
+            // a refresh of the project shown before a switch
+            Update::Table(project, _, _) if project != self.config.name => {
+                self.refreshing = false;
+                self.refresh();
+            }
+            Update::Table(_, table, updated) => {
                 self.table = *table;
                 self.online = true;
                 self.refreshing = false;
@@ -391,6 +446,12 @@ impl App {
             }
             MouseEventKind::ScrollDown if self.list_area.contains(at) => self.step(1),
             MouseEventKind::ScrollUp if self.list_area.contains(at) => self.step(-1),
+            // the header's first row: the project tabs
+            MouseEventKind::Down(MouseButton::Left) if mouse.row == 0 => {
+                if let Some(tab) = self.tab_at(mouse.column) {
+                    self.switch_project(tab);
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) if self.list_area.contains(at) => {
                 // inside the border, below the title
                 let Some(line) = mouse.row.checked_sub(self.list_area.y + 1) else {
@@ -466,6 +527,14 @@ impl App {
 
 /// Notes that could not be read are left out of the table, with a warning as
 /// `wt status` prints it.
+/// The project's table from the vault and the last remote answers, at once.
+fn offline_table(config: &Config) -> Result<Table, String> {
+    let (tasks, skipped) = vault::task::load(config)?;
+    let mut table = table::build_cached(config, tasks);
+    report_skipped(&mut table, &skipped);
+    Ok(table)
+}
+
 fn report_skipped(table: &mut Table, skipped: &[NoteError]) {
     table
         .warnings

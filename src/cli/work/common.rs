@@ -1,7 +1,7 @@
 //! Helpers shared by the work commands: errors, names, repo, task and worktree
 //! lookup, pickers.
 
-use crate::client::jira::{JiraClient, JiraIssue};
+use crate::client::jira::JiraIssue;
 use crate::client::worktree;
 use crate::config::Config;
 use crate::table::{self, Table, TaskRow};
@@ -67,7 +67,8 @@ pub(super) fn same_name(a: &str, b: &str) -> bool {
 }
 
 pub(super) fn fetch_issue(config: &Config, key: &str) -> Result<JiraIssue, String> {
-    JiraClient::from_env(&config.jira.host)?
+    config
+        .jira_client()?
         .get_issue_by_key(key)
         .map_err(|e| format!("{key}: {e}"))
 }

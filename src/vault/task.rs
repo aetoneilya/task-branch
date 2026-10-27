@@ -173,18 +173,10 @@ impl Task {
     }
 }
 
-/// The `[vault]` section: every command that reads task notes needs it.
-pub fn vault_config(config: &Config) -> Result<&VaultConfig, String> {
-    config
-        .vault
-        .as_ref()
-        .ok_or_else(|| "no [vault] section in ~/.config/worktable/config.toml".to_string())
-}
-
 /// The tasks of the configured vault, and the notes skipped because they
 /// could not be read.
 pub fn load(config: &Config) -> Result<(Vec<Task>, Vec<NoteError>), String> {
-    Ok(load_tasks(vault_config(config)?))
+    Ok(load_tasks(&config.vault))
 }
 
 /// Task notes under the configured folders; notes whose frontmatter does not

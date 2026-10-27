@@ -7,11 +7,11 @@ use super::common::{
 };
 use super::launch::{open_space, open_work};
 use crate::cli::{AddArgs, Only, StartArgs, load};
-use crate::client::jira::{JiraClient, JiraIssue};
+use crate::client::jira::JiraIssue;
 use crate::client::worktree;
 use crate::config::Config;
 use crate::vault::note::Note;
-use crate::vault::task::{Task, ticket_keys, vault_config};
+use crate::vault::task::{Task, ticket_keys};
 use serde_yaml::Value;
 
 /// `wt start <task name | KEY>`: a new task (note, herdr workspace, worktree tab
@@ -111,7 +111,7 @@ fn start_with(
         keys.insert(0, key);
     }
 
-    let vault = vault_config(config)?;
+    let vault = &config.vault;
     let path = vault
         .path
         .join(&vault.new_task_dir)
@@ -159,13 +159,14 @@ fn start_with(
 
 /// A ticket for task `title` in `[jira] project`, assigned to me.
 fn create_ticket(config: &Config, title: &str) -> Result<String, String> {
-    let project = config
-        .jira
+    let client = config.jira_client()?;
+    let jira = config.jira.as_ref().ok_or("no Jira")?;
+    let project = jira
         .project
         .as_deref()
-        .ok_or("no [jira] project in the config to create the ticket in")?;
-    JiraClient::from_env(&config.jira.host)?
-        .create_issue(project, &config.jira.issue_type, title)
+        .ok_or("no [project.jira] project in the config to create the ticket in")?;
+    client
+        .create_issue(project, &jira.issue_type, title)
         .map_err(err)
 }
 
@@ -246,7 +247,7 @@ fn add_with(
 
 /// My open Jira tickets that belong to no task, plus "new task…".
 fn pick_start_target(config: &Config, tasks: &[Task], ui: &mut dyn Ui) -> Result<String, String> {
-    let client = JiraClient::from_env(&config.jira.host)?;
+    let client = config.jira_client()?;
     let issues = client
         .search_issues_brief(
             "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",

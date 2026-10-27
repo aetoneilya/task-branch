@@ -32,21 +32,22 @@ struct RemoteCache {
 }
 
 impl RemoteCache {
-    fn path() -> PathBuf {
-        crate::config::cache_dir().join("remote.json")
+    /// One per project.
+    fn path(project: &str) -> PathBuf {
+        crate::config::cache_dir().join(format!("remote-{project}.json"))
     }
 
-    fn load() -> Option<RemoteCache> {
-        serde_json::from_slice(&std::fs::read(RemoteCache::path()).ok()?).ok()
+    fn load(project: &str) -> Option<RemoteCache> {
+        serde_json::from_slice(&std::fs::read(RemoteCache::path(project)).ok()?).ok()
     }
 
-    fn save(tickets: &HashMap<String, Ticket>, mrs: &[Mr]) {
+    fn save(project: &str, tickets: &HashMap<String, Ticket>, mrs: &[Mr]) {
         #[derive(serde::Serialize)]
         struct Ref<'a> {
             tickets: &'a HashMap<String, Ticket>,
             mrs: &'a [Mr],
         }
-        let path = RemoteCache::path();
+        let path = RemoteCache::path(project);
         let tmp = path.with_extension("json.tmp");
         if let Ok(json) = serde_json::to_vec(&Ref { tickets, mrs })
             && std::fs::write(&tmp, json).is_ok()
@@ -60,8 +61,13 @@ impl RemoteCache {
 /// and GitLab said last time stands in for what they do not say now, offline or
 /// failing.
 pub(super) fn fetch(config: &Config, tasks: Vec<Task>, online: bool, cached: bool) -> Inputs {
-    let jira = online.then(|| JiraClient::from_env(&config.jira.host));
-    let gitlab = online.then(|| GitLab::from_env(&config.gitlab.host));
+    // a project without Jira or GitLab asks them nothing, as offline
+    let jira = (online && config.jira.is_some()).then(|| config.jira_client());
+    let gitlab = config
+        .gitlab
+        .as_ref()
+        .filter(|_| online)
+        .map(|g| GitLab::from_env(&g.host));
     // Jira answers in about a second, so every ticket query starts at once: mine,
     // the keys of open tasks and worktree branches, and those of open MRs as soon
     // as GitLab lists them
@@ -104,7 +110,9 @@ pub(super) fn fetch(config: &Config, tasks: Vec<Task>, online: bool, cached: boo
 
     let mut warnings = Vec::new();
     let complete = online && tickets.is_ok() && mrs.is_ok();
-    let mut cache = (cached && !complete).then(RemoteCache::load).flatten();
+    let mut cache = (cached && !complete)
+        .then(|| RemoteCache::load(&config.name))
+        .flatten();
     let (tickets, jira) = or_cached(
         "Jira",
         online.then_some(tickets),
@@ -118,7 +126,7 @@ pub(super) fn fetch(config: &Config, tasks: Vec<Task>, online: bool, cached: boo
         &mut warnings,
     );
     if complete {
-        RemoteCache::save(&tickets, &mrs);
+        RemoteCache::save(&config.name, &tickets, &mrs);
     }
 
     let roots = worktree_roots(config);
@@ -136,7 +144,11 @@ pub(super) fn fetch(config: &Config, tasks: Vec<Task>, online: bool, cached: boo
         jira,
         gitlab,
         warnings,
-        jira_host: config.jira.host.clone(),
+        jira_host: config
+            .jira
+            .as_ref()
+            .map(|j| j.host.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -313,10 +325,12 @@ fn fetch_mrs(
     let mut projects: Vec<&str> = config
         .repos
         .iter()
-        .map(|r| r.gitlab_project.as_str())
+        .filter_map(|r| r.gitlab_project.as_deref())
         .collect();
-    if projects.is_empty() {
-        projects.push(config.gitlab.project.as_str());
+    if projects.is_empty()
+        && let Some(gitlab) = &config.gitlab
+    {
+        projects.push(gitlab.project.as_str());
     }
     projects.dedup();
 
@@ -380,20 +394,20 @@ fn fetch_mrs(
 /// Linked worktrees of every configured repo; git status and the unpushed count
 /// take ~0.5s per worktree in a big repo, so they run in parallel.
 fn collect_trees(config: &Config, with_status: bool) -> Vec<Tree> {
-    let mut found: Vec<(PathBuf, &str, Worktree)> = Vec::new();
+    let mut found: Vec<(PathBuf, Option<String>, Worktree)> = Vec::new();
     for repo in &config.repos {
         let Ok(main) = worktree::main_checkout(&repo.path) else {
             continue;
         };
         for wt in worktree::linked_worktrees(&main).unwrap_or_default() {
-            found.push((main.clone(), &repo.gitlab_project, wt));
+            found.push((main.clone(), repo.gitlab_project.clone(), wt));
         }
     }
 
     // a worktree whose inspection panicked is left out
     parallel(&found, GIT_RUNS, |(repo, project, wt)| {
         let mut tree = inspect_tree(repo.clone(), wt.clone(), with_status);
-        tree.project = Some(project.to_string());
+        tree.project = project.clone();
         tree
     })
     .into_iter()

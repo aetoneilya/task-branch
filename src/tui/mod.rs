@@ -368,6 +368,7 @@ impl App {
             }
             Update::Table(_, table, updated) => {
                 self.table = *table;
+                self.refresh_new_task();
                 self.online = true;
                 self.refreshing = false;
                 self.refresh_took = Some(self.last_refresh.elapsed());

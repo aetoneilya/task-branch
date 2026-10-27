@@ -1,10 +1,13 @@
 //! "+ new task": a form for `wt start` — the name, a Jira ticket (none, an
-//! existing one, a new one), whether to make a worktree and an agent.
+//! existing one picked from the list, a new one), whether to make a worktree
+//! and an agent.
 
 use super::App;
 use super::dialog::{Dialog, Then};
 use crate::cli::StartArgs;
 use crate::cli::work;
+use crate::client::jira::Category;
+use crate::table::Table;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -32,6 +35,39 @@ const JIRA: [(Jira, &str, &str); 3] = [
     (Jira::New, "new", "create a ticket in Jira"),
 ];
 
+/// A ticket the existing one is picked from.
+struct Ticket {
+    key: String,
+    status: String,
+    summary: String,
+}
+
+/// Open tickets without a task: the ones assigned to me and the ones worked on
+/// without a note; in progress first, then newest.
+fn tickets(table: &Table) -> Vec<Ticket> {
+    let mut open: Vec<_> = table
+        .loose
+        .iter()
+        .filter_map(|l| table.tickets.get(&l.key))
+        .filter(|t| !t.closed())
+        .collect();
+    open.sort_by(|a, b| {
+        (b.category == Category::InProgress)
+            .cmp(&(a.category == Category::InProgress))
+            .then_with(|| b.created.cmp(&a.created))
+    });
+    open.into_iter()
+        .map(|t| Ticket {
+            key: t.key.clone(),
+            status: t.status.clone(),
+            summary: t.summary.clone(),
+        })
+        .collect()
+}
+
+/// How many tickets of the dropdown show at once.
+const SHOWN: usize = 8;
+
 pub(super) struct Form {
     name: String,
     jira: Jira,
@@ -39,8 +75,11 @@ pub(super) struct Form {
     worktree: bool,
     agent: bool,
     field: Field,
-    /// The ticket's dropdown is open, on this option.
+    /// The dropdown of the current field is open, on this option.
     menu: Option<usize>,
+    /// What is typed to filter the tickets.
+    filter: String,
+    tickets: Vec<Ticket>,
     /// The project has Jira: else no ticket fields.
     has_jira: bool,
     /// Why the last ⏎ did not start it.
@@ -48,7 +87,7 @@ pub(super) struct Form {
 }
 
 impl Form {
-    fn new(has_jira: bool) -> Form {
+    fn new(has_jira: bool, tickets: Vec<Ticket>) -> Form {
         Form {
             name: String::new(),
             jira: Jira::None,
@@ -57,6 +96,8 @@ impl Form {
             agent: true,
             field: Field::Name,
             menu: None,
+            filter: String::new(),
+            tickets,
             has_jira,
             error: None,
         }
@@ -82,30 +123,69 @@ impl Form {
         self.field = fields[(at + delta).clamp(0, fields.len() as isize - 1) as usize];
     }
 
-    /// Space or ←→ on a checkbox flips it; on the ticket, opens its dropdown.
+    /// Space or ←→ on a checkbox flips it; on a dropdown, opens it.
     fn flip(&mut self) {
         match self.field {
             Field::Jira => {
                 self.menu = Some(JIRA.iter().position(|(j, ..)| *j == self.jira).unwrap_or(0));
             }
+            Field::Key => {
+                self.filter.clear();
+                self.menu = Some(
+                    self.matches()
+                        .iter()
+                        .position(|(k, _)| *k == self.key)
+                        .unwrap_or(0),
+                );
+            }
             Field::Worktree => self.worktree = !self.worktree,
             Field::Agent => self.agent = !self.agent,
-            Field::Name | Field::Key => {}
+            Field::Name => {}
         }
     }
 
     fn is_toggle(&self) -> bool {
-        matches!(self.field, Field::Jira | Field::Worktree | Field::Agent)
+        self.field != Field::Name
     }
 
-    /// Keys while the dropdown is open: ↑↓ move, ⏎ or space picks, Esc keeps
-    /// the old choice.
+    /// The tickets the filter matches, by key and summary; a typed key that is
+    /// not among them comes last, to take as it is.
+    fn matches(&self) -> Vec<(String, String)> {
+        let filter = self.filter.trim().to_lowercase();
+        let mut found: Vec<(String, String)> = self
+            .tickets
+            .iter()
+            .filter(|t| {
+                format!("{} {}", t.key, t.summary)
+                    .to_lowercase()
+                    .contains(&filter)
+            })
+            .map(|t| (t.key.clone(), format!("{}  {}", t.status, t.summary)))
+            .collect();
+        let typed = filter.to_uppercase();
+        if work::is_ticket_key(&typed) && !found.iter().any(|(k, _)| *k == typed) {
+            found.push((typed, "by its key".to_string()));
+        }
+        found
+    }
+
+    /// Keys while a dropdown is open: ↑↓ move, ⏎ picks, Esc keeps the old
+    /// choice; space picks a Jira option, typing filters the tickets.
     fn on_menu_key(&mut self, code: KeyCode, at: usize) {
+        if self.field == Field::Key {
+            return self.on_tickets_key(code, at);
+        }
         self.menu = match code {
             KeyCode::Up | KeyCode::BackTab => Some(at.saturating_sub(1)),
             KeyCode::Down | KeyCode::Tab => Some((at + 1).min(JIRA.len() - 1)),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 self.jira = JIRA[at].0;
+                // an existing ticket is picked next
+                if self.jira == Jira::Existing && self.key.is_empty() {
+                    self.field = Field::Key;
+                    self.flip();
+                    return;
+                }
                 None
             }
             KeyCode::Esc | KeyCode::Left => None,
@@ -113,11 +193,35 @@ impl Form {
         };
     }
 
+    fn on_tickets_key(&mut self, code: KeyCode, at: usize) {
+        let count = self.matches().len();
+        self.menu = match code {
+            KeyCode::Up | KeyCode::BackTab => Some(at.saturating_sub(1)),
+            KeyCode::Down | KeyCode::Tab => Some((at + 1).min(count.saturating_sub(1))),
+            KeyCode::Enter => match self.matches().into_iter().nth(at) {
+                Some((key, _)) => {
+                    self.key = key;
+                    None
+                }
+                None => Some(at),
+            },
+            KeyCode::Esc => None,
+            KeyCode::Backspace => {
+                self.filter.pop();
+                Some(0)
+            }
+            KeyCode::Char(c) => {
+                self.filter.push(c);
+                Some(0)
+            }
+            _ => Some(at),
+        };
+    }
+
     fn text(&mut self) -> Option<&mut String> {
         match self.field {
             Field::Name => Some(&mut self.name),
-            Field::Key => Some(&mut self.key),
-            Field::Jira | Field::Worktree | Field::Agent => None,
+            Field::Jira | Field::Key | Field::Worktree | Field::Agent => None,
         }
     }
 
@@ -128,7 +232,7 @@ impl Form {
         let key = self.key.trim().to_uppercase();
         let (target, tickets) = match self.jira {
             Jira::Existing if !work::is_ticket_key(&key) => {
-                return Err("the ticket's key, like UCP-12345".to_string());
+                return Err("a ticket: ⏎ on it opens the list".to_string());
             }
             Jira::Existing if name.is_empty() => (key, Vec::new()),
             Jira::Existing => (name, vec![key]),
@@ -149,7 +253,14 @@ impl Form {
 impl App {
     pub(super) fn open_new_task(&mut self) {
         let has_jira = self.config.jira.is_some();
-        self.dialog = Some(Dialog::NewTask(Form::new(has_jira)));
+        self.dialog = Some(Dialog::NewTask(Form::new(has_jira, tickets(&self.table))));
+    }
+
+    /// A refresh brings the tickets an open form picks from.
+    pub(super) fn refresh_new_task(&mut self) {
+        if let Some(Dialog::NewTask(form)) = &mut self.dialog {
+            form.tickets = tickets(&self.table);
+        }
     }
 
     /// ↑↓ and Tab move between fields, space flips a checkbox or opens the
@@ -164,7 +275,7 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => return,
-            KeyCode::Enter if form.field == Field::Jira => form.flip(),
+            KeyCode::Enter if matches!(form.field, Field::Jira | Field::Key) => form.flip(),
             KeyCode::Enter => match form.args() {
                 Ok(args) => {
                     let target = args.target.clone().unwrap_or_default();
@@ -200,11 +311,64 @@ impl App {
     }
 }
 
+/// The open ticket dropdown: the filter, then a window of the matches around
+/// the one the cursor is on.
+fn ticket_menu(form: &Form, at: usize, lit: Style, dim: Style) -> Vec<Line<'static>> {
+    let pad = format!("{:12}", "");
+    let mut lines = vec![Line::from(vec![
+        Span::raw(format!("{pad}  ")),
+        Span::styled("filter ", dim),
+        Span::raw(format!("{}▏", form.filter)),
+    ])];
+    let found = form.matches();
+    if found.is_empty() {
+        let why = if form.tickets.is_empty() {
+            "no open tickets without a task yet; type a key"
+        } else {
+            "nothing matches; type a key"
+        };
+        lines.push(Line::styled(format!("{pad}  {why}"), dim));
+        return lines;
+    }
+    let start = at
+        .saturating_sub(SHOWN - 1)
+        .min(found.len().saturating_sub(SHOWN));
+    for (i, (key, what)) in found.iter().enumerate().skip(start).take(SHOWN) {
+        let (mark, style) = if i == at {
+            ("› ", lit)
+        } else {
+            ("  ", Style::default())
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("{pad}{mark}")),
+            Span::styled(format!("{key:<10}"), style),
+            Span::styled(format!("  {}", cut(what, 60)), dim),
+        ]));
+    }
+    if found.len() > SHOWN {
+        lines.push(Line::styled(
+            format!("{pad}  {} of {}", (at + 1), found.len()),
+            dim,
+        ));
+    }
+    lines
+}
+
+fn cut(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(width - 1).collect();
+    format!("{kept}…")
+}
+
 /// The keys under the form.
 pub(super) fn hint(form: &Form) -> &'static str {
-    if form.menu.is_some() {
+    if form.menu.is_some() && form.field == Field::Key {
+        "type to filter   ↑↓ move   ⏎ pick   Esc back"
+    } else if form.menu.is_some() {
         "↑↓ move   ⏎ pick   Esc back"
-    } else if form.field == Field::Jira {
+    } else if matches!(form.field, Field::Jira | Field::Key) {
         "↑↓ field   ⏎ space open   Esc cancel"
     } else if form.is_toggle() {
         "↑↓ field   space check   ⏎ start   Esc cancel"
@@ -307,11 +471,29 @@ pub(super) fn lines(form: &Form) -> Vec<Line<'static>> {
                 let chosen = JIRA.iter().find(|(j, ..)| *j == form.jira);
                 dropdown(field, chosen.map_or("", |(_, t, _)| t))
             }
-            Field::Key => text(field, &form.key, "UCP-12345"),
+            Field::Key => {
+                let chosen = form.tickets.iter().find(|t| t.key == form.key);
+                match (form.key.as_str(), chosen) {
+                    ("", _) => {
+                        let mut spans = dropdown(field, "pick one");
+                        spans[0].style = spans[0].style.patch(dim);
+                        spans
+                    }
+                    (key, Some(t)) => {
+                        let mut spans = dropdown(field, key);
+                        spans.push(Span::styled(format!(" {}", cut(&t.summary, 40)), dim));
+                        spans
+                    }
+                    (key, None) => dropdown(field, key),
+                }
+            }
             Field::Worktree | Field::Agent => unreachable!("drawn as checkboxes"),
         });
         lines.push(Line::from(spans));
-        if let (Field::Jira, Some(at)) = (field, form.menu) {
+        if let (Field::Key, Some(at), true) = (field, form.menu, form.field == Field::Key) {
+            lines.extend(ticket_menu(form, at, lit, dim));
+        }
+        if let (Field::Jira, Some(at), true) = (field, form.menu, form.field == Field::Jira) {
             for (i, (_, name, what)) in JIRA.iter().enumerate() {
                 let (mark, style) = if i == at {
                     ("› ", lit)
@@ -351,7 +533,7 @@ mod tests {
 
     #[test]
     fn an_existing_ticket_without_a_name_names_the_task() {
-        let mut form = Form::new(true);
+        let mut form = Form::new(true, Vec::new());
         assert!(form.args().is_err());
         form.jira = Jira::Existing;
         form.key = "ucp-1".into();
@@ -369,7 +551,7 @@ mod tests {
 
     #[test]
     fn the_key_field_shows_only_for_an_existing_ticket() {
-        let mut form = Form::new(true);
+        let mut form = Form::new(true, Vec::new());
         form.field = Field::Jira;
         form.move_field(1);
         assert!(form.field == Field::Worktree);
@@ -377,8 +559,40 @@ mod tests {
         form.flip();
         form.on_menu_key(KeyCode::Down, form.menu.unwrap());
         form.on_menu_key(KeyCode::Enter, form.menu.unwrap());
-        assert!(form.jira == Jira::Existing && form.menu.is_none());
-        form.move_field(1);
-        assert!(form.field == Field::Key);
+        // picking "existing" opens the tickets
+        assert!(form.jira == Jira::Existing && form.field == Field::Key);
+        assert!(form.menu.is_some());
+    }
+
+    #[test]
+    fn a_ticket_is_picked_from_the_list_or_typed() {
+        let ticket = |key: &str, summary: &str| Ticket {
+            key: key.into(),
+            status: "Open".into(),
+            summary: summary.into(),
+        };
+        let mut form = Form::new(
+            true,
+            vec![ticket("UCP-1", "video feed"), ticket("UCP-2", "clips")],
+        );
+        form.jira = Jira::Existing;
+        form.field = Field::Key;
+        form.flip();
+        for c in "clip".chars() {
+            form.on_menu_key(KeyCode::Char(c), form.menu.unwrap());
+        }
+        form.on_menu_key(KeyCode::Enter, form.menu.unwrap());
+        assert_eq!(form.key, "UCP-2");
+
+        form.flip();
+        for c in "ucp-7".chars() {
+            form.on_menu_key(KeyCode::Char(c), form.menu.unwrap());
+        }
+        assert_eq!(
+            form.matches(),
+            vec![("UCP-7".to_string(), "by its key".to_string())]
+        );
+        form.on_menu_key(KeyCode::Enter, form.menu.unwrap());
+        assert_eq!(form.key, "UCP-7");
     }
 }

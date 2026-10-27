@@ -31,8 +31,6 @@ const JIRA: [(Jira, &str); 3] = [
     (Jira::New, "new"),
 ];
 
-const YES_NO: [(bool, &str); 2] = [(true, "yes"), (false, "no")];
-
 pub(super) struct Form {
     name: String,
     jira: Jira,
@@ -80,7 +78,7 @@ impl Form {
         self.field = fields[(at + delta).clamp(0, fields.len() as isize - 1) as usize];
     }
 
-    /// ←→ on a choice: the next option, around.
+    /// ←→ on a choice: the next option, around; on a checkbox, it flips.
     fn turn(&mut self, delta: isize) {
         fn next<T: Copy + PartialEq>(options: &[(T, &str)], now: T, delta: isize) -> T {
             let at = options.iter().position(|(o, _)| *o == now).unwrap_or(0) as isize;
@@ -88,10 +86,22 @@ impl Form {
         }
         match self.field {
             Field::Jira => self.jira = next(&JIRA, self.jira, delta),
-            Field::Worktree => self.worktree = next(&YES_NO, self.worktree, delta),
-            Field::Agent => self.agent = next(&YES_NO, self.agent, delta),
+            Field::Worktree | Field::Agent => self.flip(),
             Field::Name | Field::Key => {}
         }
+    }
+
+    /// Space or ←→ on a checkbox.
+    fn flip(&mut self) {
+        match self.field {
+            Field::Worktree => self.worktree = !self.worktree,
+            Field::Agent => self.agent = !self.agent,
+            _ => {}
+        }
+    }
+
+    fn is_checkbox(&self) -> bool {
+        matches!(self.field, Field::Worktree | Field::Agent)
     }
 
     fn text(&mut self) -> Option<&mut String> {
@@ -163,6 +173,7 @@ impl App {
                     text.pop();
                 }
             }
+            KeyCode::Char(' ') if form.is_checkbox() => form.flip(),
             KeyCode::Char(c) if !ctrl => {
                 if let Some(text) = form.text() {
                     text.push(c);
@@ -214,14 +225,49 @@ pub(super) fn lines(form: &Form) -> Vec<Line<'static>> {
         }
     };
 
+    // `› [✓] worktree`: checked green, unchecked dim
+    let checkbox = |field: Field, checked: bool, text: &str| {
+        let on = form.field == field;
+        let (mark, style) = if checked {
+            (
+                "[✓]",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("[ ]", dim)
+        };
+        let text_style = match (on, checked) {
+            (true, _) => Style::default().fg(Color::Yellow),
+            (false, true) => Style::default(),
+            (false, false) => dim,
+        };
+        Line::from(vec![
+            Span::raw(if on { "› " } else { "  " }),
+            Span::styled(mark, style),
+            Span::styled(format!(" {text}"), text_style),
+        ])
+    };
+
     let mut lines = Vec::new();
     for field in form.fields() {
+        match field {
+            Field::Worktree => {
+                lines.push(checkbox(field, form.worktree, "worktree"));
+                continue;
+            }
+            Field::Agent => {
+                lines.push(checkbox(field, form.agent, "agent"));
+                continue;
+            }
+            _ => {}
+        }
         let mut spans = match field {
             Field::Name => vec![label(field, "name")],
             Field::Jira => vec![label(field, "jira")],
             Field::Key => vec![label(field, "ticket")],
-            Field::Worktree => vec![label(field, "worktree")],
-            Field::Agent => vec![label(field, "agent")],
+            Field::Worktree | Field::Agent => unreachable!("drawn as checkboxes"),
         };
         spans.extend(match field {
             Field::Name => {
@@ -234,13 +280,7 @@ pub(super) fn lines(form: &Form) -> Vec<Line<'static>> {
             }
             Field::Jira => choice(JIRA.iter().map(|(j, t)| (*t, *j == form.jira)).collect()),
             Field::Key => text(field, &form.key, "UCP-12345"),
-            Field::Worktree => choice(
-                YES_NO
-                    .iter()
-                    .map(|(v, t)| (*t, *v == form.worktree))
-                    .collect(),
-            ),
-            Field::Agent => choice(YES_NO.iter().map(|(v, t)| (*t, *v == form.agent)).collect()),
+            Field::Worktree | Field::Agent => unreachable!("drawn as checkboxes"),
         });
         lines.push(Line::from(spans));
     }

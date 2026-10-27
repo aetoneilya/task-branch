@@ -326,7 +326,7 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 | `w` | — | next agent waiting for me |
 | `v` | — | what kinds of rows to show |
 | `p` | — | details pane on/off (hidden under 110 columns) |
-| `⏎`, click | "+ new task" row above the tasks | a form for `wt start`: name; a Jira dropdown (⏎ or space opens it): none / existing (a list of open tickets without a task — assigned to me or worked on — in progress first; typing filters, a typed key is taken as is) / new ticket; checkboxes worktree and agent (neither: only the note); no Jira fields in a project without Jira |
+| `⏎`, click | "+ new task" row above the tasks | a form for `wt start`: name; one Jira dropdown (⏎ or space opens it): none, new ticket, then the open tickets without a task — assigned to me or worked on — in progress first; typing filters, a typed key is taken as is; checkboxes worktree and agent (neither: only the note); no Jira field in a project without Jira |
 | `c` | task, ticket | `wt select --session` |
 | `R`, `d` | worktree | `wt review`, `wt done` |
 | `d` | task | `wt done "<task>"`: close it with its Jira tickets |

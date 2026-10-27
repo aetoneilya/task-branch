@@ -218,6 +218,10 @@ the new tab runs the hidden `wt prepare <spec>` — step lines with a spinner an
 git's own checkout progress, then the brief; the tab's shell then cds into the
 worktree and starts `command claude` — herdr shows the branch of the shell's
 cwd. The agent is named in the background once herdr detects it.
+Two fetches at once in one repo (two tasks started together) race for
+`refs/remotes/origin/master`: the loser's "cannot lock ref" is retried, and a
+fetch that still fails only warns — the worktree starts from origin as last
+fetched.
 
 ### `wt add [<task>] <KEY> [--in <worktree>] [-n name] [-m text] [--bg]`
 
@@ -241,7 +245,10 @@ chosen work's worktree (picker if the task has several):
    (`--session` picks one of the task's sessions → `claude --resume <id>`);
 3. worktree removed, branch still exists locally or on origin → recreate the
    worktree at the same path (sessions are keyed by directory), then as 2;
-4. branch gone → says so; the task note and session ids remain.
+4. branch gone → says so; the task note and session ids remain;
+5. a task with neither worktrees nor sessions (an idea, or a start whose
+   worktree failed) → its first worktree and agent, as `wt start` would make
+   them: named `--tree`, else after its first ticket, else after its title.
 
 ### `wt status [-t tag] [--all] [--no-write]`
 

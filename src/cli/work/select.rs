@@ -1,8 +1,11 @@
 //! `wt select`: back to existing work, focusing its agent or resuming its session.
 
-use super::brief::brief_path;
-use super::common::{Terminal, Ui, choose_repo, err, find_task, is_ticket_key, repo_with_worktree};
-use super::launch::{launch, open_agent};
+use super::brief::{brief_path, brief_text};
+use super::common::{
+    Terminal, Ui, branch_name, choose_repo, err, fetch_issue, find_task, is_ticket_key,
+    name_from_issue, name_from_text, repo_with_worktree,
+};
+use super::launch::{Open, launch, open_agent, open_work};
 use crate::cli::SelectArgs;
 use crate::cli::load;
 use crate::client::sessions::Session;
@@ -16,6 +19,47 @@ use std::path::{Path, PathBuf};
 enum Work {
     Task(usize),
     Ticket(usize),
+}
+
+/// A task with nothing to get back to (an idea, or a start whose worktree
+/// failed) gets its first worktree and agent: named `tree_name`, else after
+/// its first ticket, else after its title.
+fn first_worktree(
+    config: &Config,
+    row: &TaskRow,
+    tree_name: Option<String>,
+    bg: bool,
+    ui: &mut dyn Ui,
+) -> Result<(), String> {
+    let task = &row.task;
+    let key = task.tickets.first();
+    let issue = key.map(|k| fetch_issue(config, k)).transpose()?;
+    let name = match (tree_name, &issue) {
+        (Some(name), _) => name,
+        (None, Some(issue)) => name_from_issue(issue),
+        (None, None) => name_from_text(&task.name).ok_or_else(|| {
+            format!(
+                "no latin worktree name comes out of \"{}\" — give one with --tree",
+                task.name
+            )
+        })?,
+    };
+    let main = choose_repo(config, ui)?;
+    let branch = branch_name(config, key, &name);
+    let tree = worktree::worktree_dir(&main, &name);
+    let brief = brief_text(
+        &tree,
+        &branch,
+        Some(task),
+        issue.as_ref(),
+        &task.tickets,
+        None,
+    );
+    let open = Open {
+        agent: true,
+        focus: !bg,
+    };
+    open_work(task, &main, &name, &branch, brief, open, ui)
 }
 
 /// `wt select [<task | KEY>]`: back to existing work — focus its agent, or start
@@ -79,9 +123,10 @@ pub(crate) fn select(config: &Config, args: SelectArgs, ui: &mut dyn Ui) -> Resu
 
     if trees.is_empty() {
         let Some(last) = sessions.first() else {
-            return Err(format!(
-                "\"{space}\" has neither worktrees nor sessions: wt add \"{space}\" <KEY>"
-            ));
+            return match row {
+                Some(row) => first_worktree(config, row, tree_name, bg, ui),
+                None => Err(format!("\"{space}\" has neither worktrees nor sessions")),
+            };
         };
         let tree = restore_worktree(config, row, &last.worktree, ui)?;
         return resume(&table, &space, last, &tree, note, bg, ui);

@@ -140,10 +140,14 @@ pub(in crate::cli) fn cli_prepare(spec_path: &Path) -> Result<(), String> {
         let plan = progress::step("worktree plan", || {
             worktree::plan_worktree(&spec.main, &spec.name, &spec.branch)
         })?;
-        if let Some(remote_branch) = &plan.fetch {
-            progress::step(&format!("git fetch origin {remote_branch}"), || {
+        // a failed fetch leaves the worktree on the remote branch as last
+        // fetched: better than no worktree
+        if let Some(remote_branch) = &plan.fetch
+            && let Err(e) = progress::step(&format!("git fetch origin {remote_branch}"), || {
                 worktree::fetch(&spec.main, remote_branch)
-            })?;
+            })
+        {
+            eprintln!("  ! {e}\n  going on from origin/{remote_branch} as last fetched");
         }
         progress::loud_step("git worktree add", || {
             worktree::add_worktree(&spec.main, &plan, true)

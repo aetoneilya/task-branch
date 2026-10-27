@@ -221,8 +221,20 @@ pub fn plan_worktree(main: &Path, name: &str, branch: &str) -> Result<WorktreePl
     })
 }
 
+/// Two fetches at once in one repo (two tasks started together, an agent's
+/// own fetch) race for the remote ref: the loser fails with "cannot lock ref"
+/// and goes again.
 pub fn fetch(main: &Path, remote_branch: &str) -> Result<()> {
-    git_output(main, &["fetch", "-q", "origin", remote_branch]).map(|_| ())
+    let mut tries = 0;
+    loop {
+        match git_output(main, &["fetch", "-q", "origin", remote_branch]) {
+            Err(GitError::NonZeroExit(e)) if tries < 3 && e.contains("cannot lock ref") => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(500 * tries));
+            }
+            result => return result.map(|_| ()),
+        }
+    }
 }
 
 /// The plan's `git worktree add`; `progress` leaves git's own checkout progress
@@ -253,8 +265,9 @@ pub fn create_worktree(main: &Path, name: &str, branch: &str) -> Result<PathBuf>
         return Ok(dir);
     }
     let plan = plan_worktree(main, name, branch)?;
+    // a failed fetch leaves the worktree on the remote branch as last fetched
     if let Some(remote_branch) = &plan.fetch {
-        fetch(main, remote_branch)?;
+        let _ = fetch(main, remote_branch);
     }
     add_worktree(main, &plan, false)?;
     copy_worktree_includes(main, &dir);

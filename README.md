@@ -62,7 +62,7 @@ wt                         the TUI (also `wt tui`)
 wt start [<task|KEY>]      new task: note, herdr workspace, worktree tab with claude
 wt add [<task>] <KEY>      add a ticket to a task, with its own worktree tab
 wt attach <KEY> [<task>]   put a ticket into a task without a worktree
-wt select [<task|KEY>]     go back to a task: its agent, or claude resuming its session
+wt select [<task|KEY>]     go back to a task: its agent, or claude resuming its session; a task with nothing yet gets its first worktree
 wt note "<text>"           (for agents) append a finding to the note's "Agent notes"
 wt status                  the table in plain text; updates `state` and `sessions` in notes
 wt review [<worktree>]     start a reviewer agent next to the worktree's agent

@@ -121,7 +121,8 @@ pub(crate) struct AddArgs {
 pub(crate) struct SelectArgs {
     /// Task name or ticket key; a picker when omitted
     pub(crate) target: Option<String>,
-    /// That worktree of the task
+    /// That worktree of the task; for a task without any, the name of its
+    /// first one
     #[arg(long)]
     pub(crate) tree: Option<String>,
     /// Pick which of the task's sessions to resume

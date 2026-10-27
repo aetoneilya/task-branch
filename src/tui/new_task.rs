@@ -25,10 +25,11 @@ enum Field {
     Agent,
 }
 
-const JIRA: [(Jira, &str); 3] = [
-    (Jira::None, "none"),
-    (Jira::Existing, "existing"),
-    (Jira::New, "new"),
+/// The ticket's options: the name and what it does.
+const JIRA: [(Jira, &str, &str); 3] = [
+    (Jira::None, "none", "no ticket"),
+    (Jira::Existing, "existing", "link a ticket by its key"),
+    (Jira::New, "new", "create a ticket in Jira"),
 ];
 
 pub(super) struct Form {
@@ -38,6 +39,8 @@ pub(super) struct Form {
     worktree: bool,
     agent: bool,
     field: Field,
+    /// The ticket's dropdown is open, on this option.
+    menu: Option<usize>,
     /// The project has Jira: else no ticket fields.
     has_jira: bool,
     /// Why the last ⏎ did not start it.
@@ -53,6 +56,7 @@ impl Form {
             worktree: true,
             agent: true,
             field: Field::Name,
+            menu: None,
             has_jira,
             error: None,
         }
@@ -78,30 +82,35 @@ impl Form {
         self.field = fields[(at + delta).clamp(0, fields.len() as isize - 1) as usize];
     }
 
-    /// ←→ on a choice: the next option, around; on a checkbox, it flips.
-    fn turn(&mut self, delta: isize) {
-        fn next<T: Copy + PartialEq>(options: &[(T, &str)], now: T, delta: isize) -> T {
-            let at = options.iter().position(|(o, _)| *o == now).unwrap_or(0) as isize;
-            options[(at + delta).rem_euclid(options.len() as isize) as usize].0
-        }
+    /// Space or ←→ on a checkbox flips it; on the ticket, opens its dropdown.
+    fn flip(&mut self) {
         match self.field {
-            Field::Jira => self.jira = next(&JIRA, self.jira, delta),
-            Field::Worktree | Field::Agent => self.flip(),
+            Field::Jira => {
+                self.menu = Some(JIRA.iter().position(|(j, ..)| *j == self.jira).unwrap_or(0));
+            }
+            Field::Worktree => self.worktree = !self.worktree,
+            Field::Agent => self.agent = !self.agent,
             Field::Name | Field::Key => {}
         }
     }
 
-    /// Space or ←→ on a checkbox.
-    fn flip(&mut self) {
-        match self.field {
-            Field::Worktree => self.worktree = !self.worktree,
-            Field::Agent => self.agent = !self.agent,
-            _ => {}
-        }
+    fn is_toggle(&self) -> bool {
+        matches!(self.field, Field::Jira | Field::Worktree | Field::Agent)
     }
 
-    fn is_checkbox(&self) -> bool {
-        matches!(self.field, Field::Worktree | Field::Agent)
+    /// Keys while the dropdown is open: ↑↓ move, ⏎ or space picks, Esc keeps
+    /// the old choice.
+    fn on_menu_key(&mut self, code: KeyCode, at: usize) {
+        self.menu = match code {
+            KeyCode::Up | KeyCode::BackTab => Some(at.saturating_sub(1)),
+            KeyCode::Down | KeyCode::Tab => Some((at + 1).min(JIRA.len() - 1)),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.jira = JIRA[at].0;
+                None
+            }
+            KeyCode::Esc | KeyCode::Left => None,
+            _ => Some(at),
+        };
     }
 
     fn text(&mut self) -> Option<&mut String> {
@@ -143,12 +152,19 @@ impl App {
         self.dialog = Some(Dialog::NewTask(Form::new(has_jira)));
     }
 
-    /// ↑↓ and Tab move between fields, ←→ choose, typing fills the text
-    /// fields; ⏎ starts it, Esc closes.
+    /// ↑↓ and Tab move between fields, space flips a checkbox or opens the
+    /// ticket's dropdown, typing fills the text fields; ⏎ starts it, Esc
+    /// closes.
     pub(super) fn on_new_task_key(&mut self, key: KeyEvent, mut form: Form) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(at) = form.menu {
+            form.on_menu_key(key.code, at);
+            self.dialog = Some(Dialog::NewTask(form));
+            return;
+        }
         match key.code {
             KeyCode::Esc => return,
+            KeyCode::Enter if form.field == Field::Jira => form.flip(),
             KeyCode::Enter => match form.args() {
                 Ok(args) => {
                     let target = args.target.clone().unwrap_or_default();
@@ -166,14 +182,13 @@ impl App {
             },
             KeyCode::Up | KeyCode::BackTab => form.move_field(-1),
             KeyCode::Down | KeyCode::Tab => form.move_field(1),
-            KeyCode::Left => form.turn(-1),
-            KeyCode::Right => form.turn(1),
+            KeyCode::Left | KeyCode::Right if form.is_toggle() => form.flip(),
             KeyCode::Backspace => {
                 if let Some(text) = form.text() {
                     text.pop();
                 }
             }
-            KeyCode::Char(' ') if form.is_checkbox() => form.flip(),
+            KeyCode::Char(' ') if form.is_toggle() => form.flip(),
             KeyCode::Char(c) if !ctrl => {
                 if let Some(text) = form.text() {
                     text.push(c);
@@ -182,6 +197,19 @@ impl App {
             _ => {}
         }
         self.dialog = Some(Dialog::NewTask(form));
+    }
+}
+
+/// The keys under the form.
+pub(super) fn hint(form: &Form) -> &'static str {
+    if form.menu.is_some() {
+        "↑↓ move   ⏎ pick   Esc back"
+    } else if form.field == Field::Jira {
+        "↑↓ field   ⏎ space open   Esc cancel"
+    } else if form.is_toggle() {
+        "↑↓ field   space check   ⏎ start   Esc cancel"
+    } else {
+        "↑↓ field   ⏎ start   Esc cancel"
     }
 }
 
@@ -201,17 +229,14 @@ pub(super) fn lines(form: &Form) -> Vec<Line<'static>> {
             },
         )
     };
-    let choice = |options: Vec<(&str, bool)>| {
-        let mut spans = vec![];
-        for (text, chosen) in options {
-            spans.push(if chosen {
-                Span::styled(format!("[ {text} ]"), lit)
-            } else {
-                Span::styled(format!("  {text}  "), dim)
-            });
-            spans.push(Span::raw(" "));
-        }
-        spans
+    // `[ none ▾ ]`, lit while the cursor is on it
+    let dropdown = |field: Field, text: &str| {
+        let style = if form.field == field && form.menu.is_none() {
+            lit
+        } else {
+            Style::default()
+        };
+        vec![Span::styled(format!("[ {text} ▾ ]"), style)]
     };
     let text = |field: Field, value: &str, placeholder: &str| {
         let cursor = if form.field == field { "▏" } else { "" };
@@ -278,11 +303,28 @@ pub(super) fn lines(form: &Form) -> Vec<Line<'static>> {
                 };
                 text(field, &form.name, hint)
             }
-            Field::Jira => choice(JIRA.iter().map(|(j, t)| (*t, *j == form.jira)).collect()),
+            Field::Jira => {
+                let chosen = JIRA.iter().find(|(j, ..)| *j == form.jira);
+                dropdown(field, chosen.map_or("", |(_, t, _)| t))
+            }
             Field::Key => text(field, &form.key, "UCP-12345"),
             Field::Worktree | Field::Agent => unreachable!("drawn as checkboxes"),
         });
         lines.push(Line::from(spans));
+        if let (Field::Jira, Some(at)) = (field, form.menu) {
+            for (i, (_, name, what)) in JIRA.iter().enumerate() {
+                let (mark, style) = if i == at {
+                    ("› ", lit)
+                } else {
+                    ("  ", Style::default())
+                };
+                lines.push(Line::from(vec![
+                    Span::raw(format!("{:12}{mark}", "")),
+                    Span::styled(format!("{name:<9}"), style),
+                    Span::styled(format!("  {what}"), dim),
+                ]));
+            }
+        }
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
@@ -332,7 +374,10 @@ mod tests {
         form.move_field(1);
         assert!(form.field == Field::Worktree);
         form.field = Field::Jira;
-        form.turn(1);
+        form.flip();
+        form.on_menu_key(KeyCode::Down, form.menu.unwrap());
+        form.on_menu_key(KeyCode::Enter, form.menu.unwrap());
+        assert!(form.jira == Jira::Existing && form.menu.is_none());
         form.move_field(1);
         assert!(form.field == Field::Key);
     }

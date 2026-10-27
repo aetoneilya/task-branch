@@ -81,7 +81,7 @@ wt completions <shell>     shell completion script
 
 - `↑↓`/`jk` move, `←→`/`hl`/space fold, `z` fold / unfold all, `/` filter, `.` all / active only, `v` hide MRs, worktrees, …
 - `⏎` focus the agent, or resume work (`wt select`)
-- `+ new task` row above the tasks: ⏎ or a click opens a form (name, Jira ticket: none / existing / new, checkboxes worktree, agent); `s` start a ticket / add one to a task, `a` attach a ticket
+- `+ new task` row above the tasks: ⏎ or a click opens a form (name, a Jira dropdown: none / existing / new, checkboxes worktree, agent); `s` start a ticket / add one to a task, `a` attach a ticket
 - `b` browser, `o` note in Obsidian, `e` note in `$EDITOR`, `i` worktree in the IDE
 - `R` review, `d` remove a worktree / close a task
 - `w` next agent waiting for you, `p` details pane, `r` refresh, `q` quit

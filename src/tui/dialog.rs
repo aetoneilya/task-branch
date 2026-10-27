@@ -485,7 +485,7 @@ impl App {
             Dialog::NewTask(form) => (
                 "new task",
                 super::new_task::lines(form),
-                "↑↓ field   ←→ choose   space check   ⏎ start   Esc cancel",
+                super::new_task::hint(form),
             ),
             Dialog::Hide { selected } => (
                 "show",

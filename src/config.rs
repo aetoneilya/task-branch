@@ -154,25 +154,29 @@ impl Config {
     }
 }
 
-fn expand_home(path: &Path) -> PathBuf {
+pub fn expand_home(path: &Path) -> PathBuf {
     match (path.strip_prefix("~"), dirs::home_dir()) {
         (Ok(rest), Some(home)) => home.join(rest),
         _ => path.to_path_buf(),
     }
 }
 
-/// Every configured project, in the file's order.
-pub fn load_projects() -> Result<Vec<Config>, ConfigError> {
+/// `$WORKTABLE_CONFIG`, else `worktable/config.toml` in the config dir.
+fn config_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .or_else(dirs::config_dir)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let config_path = std::env::var_os("WORKTABLE_CONFIG")
+    std::env::var_os("WORKTABLE_CONFIG")
         .map(PathBuf::from)
-        .unwrap_or_else(|| base.join("worktable").join("config.toml"));
+        .unwrap_or_else(|| base.join("worktable").join("config.toml"))
+}
 
+/// Every configured project, in the file's order.
+pub fn load_projects() -> Result<Vec<Config>, ConfigError> {
+    let config_path = config_path();
     let contents =
         fs::read_to_string(&config_path).map_err(|e| ConfigError::Read(config_path.clone(), e))?;
     let file: FileConfig =
@@ -184,6 +188,40 @@ pub fn load_projects() -> Result<Vec<Config>, ConfigError> {
         return Err(ConfigError::Invalid(config_path, "no [[project]]".into()));
     }
     Ok(projects)
+}
+
+/// A `[[project]]` with its notes in `task_dir` and, if given, one repo: the
+/// config file gets it at its end, the rest of the file left as it is.
+pub fn add_project(name: &str, task_dir: &str, repo: Option<&str>) -> Result<Config, String> {
+    let path = config_path();
+    let mut contents =
+        fs::read_to_string(&path).map_err(|e| ConfigError::Read(path.clone(), e).to_string())?;
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(&project_block(name, task_dir, repo));
+    // checked before it is written: a file that no longer parses breaks every command
+    let file: FileConfig =
+        toml::from_str(&contents).map_err(|e| ConfigError::Parse(path.clone(), e).to_string())?;
+    let config = file
+        .projects()?
+        .pop()
+        .ok_or_else(|| "the project did not make it into the config".to_string())?;
+    fs::write(&path, contents).map_err(|e| format!("can't write {}: {e}", path.display()))?;
+    Ok(config)
+}
+
+fn project_block(name: &str, task_dir: &str, repo: Option<&str>) -> String {
+    let quote = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let mut block = format!(
+        "\n[[project]]\nname = {}\ntask_dirs = [{}]\n",
+        quote(name),
+        quote(task_dir)
+    );
+    if let Some(repo) = repo {
+        block.push_str(&format!("\n[[project.repo]]\npath = {}\n", quote(repo)));
+    }
+    block
 }
 
 /// The project named `name`; without a name, the one whose repo `dir` is in,
@@ -274,5 +312,28 @@ mod tests {
         assert_eq!(choose_project(&projects, None, None), Ok(0));
         assert_eq!(choose_project(&projects, Some("VPN"), None), Ok(1));
         assert!(choose_project(&projects, Some("kitten"), None).is_err());
+    }
+
+    #[test]
+    fn an_added_project_goes_last_with_its_repo() {
+        let mut text =
+            "[vault]\npath = \"/v\"\n\n[[project]]\nname = \"ucp\"\ntask_dirs = [\"t\"]\n"
+                .to_string();
+        text.push_str(&project_block(
+            "kcal \"bot\"",
+            "10/projects/kcal",
+            Some("~/code/kcal"),
+        ));
+        text.push_str(&project_block("notes", "10/notes", None));
+        let file: FileConfig = toml::from_str(&text).unwrap();
+        let projects = file.projects().unwrap();
+        let names: Vec<_> = projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["ucp", "kcal \"bot\"", "notes"]);
+        assert_eq!(
+            projects[1].vault.new_task_dir,
+            PathBuf::from("10/projects/kcal")
+        );
+        assert!(projects[1].repos[0].path.ends_with("code/kcal"));
+        assert!(projects[2].repos.is_empty());
     }
 }

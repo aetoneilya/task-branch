@@ -10,7 +10,9 @@ mod dialog;
 mod draw;
 mod hide;
 mod keys;
+mod markdown;
 mod new_task;
+mod project;
 mod rows;
 
 use crate::client::herdr;
@@ -96,6 +98,12 @@ struct App {
     /// The project shown: its index in `projects`, its config.
     project: usize,
     config: Arc<Config>,
+    /// The project dropdown takes the keys: ↑ from the list's top row.
+    projects_focused: bool,
+    /// The dropdown is open over the list.
+    picker: Option<project::Picker>,
+    /// Where the last frame drew the open dropdown: mouse targets.
+    picker_area: Rect,
     table: Table,
     online: bool,
     rows: Vec<Row>,
@@ -156,6 +164,9 @@ impl App {
             projects,
             project,
             config,
+            projects_focused: false,
+            picker: None,
+            picker_area: Rect::default(),
             table,
             online: false,
             rows: Vec::new(),
@@ -252,7 +263,7 @@ impl App {
         });
     }
 
-    /// `[` `]`, Tab or a click on its tab: another project, shown at once from
+    /// `[` `]`, Tab or the dropdown: another project, shown at once from
     /// what is on disk, then refreshed.
     fn switch_project(&mut self, index: usize) {
         if index == self.project || index >= self.projects.len() {
@@ -437,6 +448,17 @@ impl App {
             return;
         }
         let at = Position::new(mouse.column, mouse.row);
+        if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if mouse.row == 0 {
+                return self.click_header(mouse.column);
+            }
+            if self.picker.is_some() {
+                return self.click_picker(mouse.column, mouse.row);
+            }
+        }
+        if self.picker.is_some() {
+            return;
+        }
         let in_details = self.preview_shown && self.details_area.contains(at);
         match mouse.kind {
             MouseEventKind::ScrollDown if in_details => {
@@ -447,12 +469,6 @@ impl App {
             }
             MouseEventKind::ScrollDown if self.list_area.contains(at) => self.step(1),
             MouseEventKind::ScrollUp if self.list_area.contains(at) => self.step(-1),
-            // the header's first row: the project tabs
-            MouseEventKind::Down(MouseButton::Left) if mouse.row == 0 => {
-                if let Some(tab) = self.tab_at(mouse.column) {
-                    self.switch_project(tab);
-                }
-            }
             MouseEventKind::Down(MouseButton::Left) if self.list_area.contains(at) => {
                 // inside the border, below the title
                 let Some(line) = mouse.row.checked_sub(self.list_area.y + 1) else {
@@ -473,6 +489,12 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// No row above the selected one but section titles: ↑ goes to the dropdown.
+    fn at_top(&self) -> bool {
+        let selected = self.list.selected().unwrap_or(0);
+        self.rows.iter().take(selected).all(|r| r.kind.is_header())
     }
 
     fn step(&mut self, delta: isize) {

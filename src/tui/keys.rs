@@ -29,6 +29,13 @@ impl App {
             return;
         }
         self.message = None;
+        if let Some(picker) = self.picker.take() {
+            self.on_picker_key(key, picker);
+            return;
+        }
+        if self.projects_focused && self.on_projects_key(key) {
+            return;
+        }
         let selected = self.list.selected().unwrap_or(0);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
@@ -48,6 +55,7 @@ impl App {
                 self.detail_scroll = self.detail_scroll.saturating_sub(10)
             }
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
+            KeyCode::Up | KeyCode::Char('k') if self.at_top() => self.focus_projects(),
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::PageDown => self.select(selected + 15),
             KeyCode::PageUp => self.select(selected.saturating_sub(15)),

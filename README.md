@@ -28,7 +28,7 @@ branch_prefix = "i.udalov/"
 # review_model = "claude-fable-5-1"
 # ide = "IntelliJ IDEA"
 
-[[project]]                 # a tab in the TUI, `wt -p ucp`
+[[project]]                 # in the TUI's project dropdown, `wt -p ucp`
 name = "ucp"
 task_dirs = ["30-work/tasks"]
 # new_task_dir = "30-work/tasks"   # default: the first of task_dirs
@@ -49,8 +49,9 @@ path = "~/code/pet-projects/vpn-bot"
 ```
 
 Commands work on one project: `-p <name>`, else the one whose repo the current
-directory is in, else the first. The TUI opens on the last one shown; `[` `]`,
-Tab or a click on its tab switch.
+directory is in, else the first. The TUI opens on the last one shown; ↑ from the
+top of the list gets to the project dropdown, ⏎ opens it, and its "+ new project"
+appends a `[[project]]` here. `[` `]` and Tab switch at once.
 
 Tokens come from `JIRA_TOKEN` and `GITLAB_TOKEN`. `WT_TRACE=1` prints how long
 each fetch, the matching and the rendering took to stderr.

@@ -72,11 +72,14 @@ impl App {
                     .title(title)
                     .border_style(Style::default().fg(Color::DarkGray)),
             )
-            .highlight_style(
+            .highlight_style(if self.projects_focused {
+                // the keys are on the dropdown: the selection only stays in sight
+                Style::default().bg(Color::Rgb(36, 39, 45))
+            } else {
                 Style::default()
                     .bg(Color::Rgb(50, 54, 62))
-                    .add_modifier(Modifier::BOLD),
-            );
+                    .add_modifier(Modifier::BOLD)
+            });
         frame.render_stateful_widget(list, left, &mut self.list);
         (self.list_area, self.details_area) = (left, right);
 
@@ -97,6 +100,7 @@ impl App {
         };
         frame.render_widget(Paragraph::new(footer_line), footer);
 
+        self.draw_picker(frame);
         if self.help {
             self.draw_help(frame);
         }
@@ -106,7 +110,20 @@ impl App {
     /// Keys that do something on the selected row, then the ones that always do.
     pub(super) fn hints(&self) -> Line<'static> {
         let mut keys: Vec<(&str, String)> = Vec::new();
-        if let Some(row) = self.current() {
+        if self.picker.is_some() {
+            keys.extend([
+                ("type", "filter".into()),
+                ("↑↓", "move".into()),
+                ("⏎", "pick".into()),
+                ("Esc", "close".into()),
+            ]);
+        } else if self.projects_focused {
+            keys.extend([
+                ("⏎", "projects".into()),
+                ("Tab", "next project".into()),
+                ("↓", "back to the list".into()),
+            ]);
+        } else if let Some(row) = self.current() {
             let under_task = matches!(row.root, Kind::Task(_));
             let has_url = self.url().is_some();
             match &row.kind {
@@ -181,6 +198,10 @@ impl App {
             spans.push(Span::styled(format!("{key} "), key_style));
             spans.push(Span::raw(format!("{label}  ")));
         }
+        // the open dropdown takes every key
+        if self.picker.is_some() {
+            return Line::from(spans);
+        }
         spans.push(Span::styled("│ ", Style::default().fg(Color::DarkGray)));
         let all = if self.all { "active" } else { "all" };
         if !self.waiting().is_empty() {
@@ -216,19 +237,6 @@ impl App {
         Line::from(spans)
     }
 
-    /// The project tab under column `x` of the header.
-    pub(super) fn tab_at(&self, x: u16) -> Option<usize> {
-        let mut end = 0;
-        for (i, project) in self.projects.iter().enumerate() {
-            // " name " and the "│" before all but the first
-            end += project.name.chars().count() as u16 + 2 + (i > 0) as u16;
-            if x < end {
-                return Some(i);
-            }
-        }
-        None
-    }
-
     fn header(&self) -> Paragraph<'static> {
         // roots per section: tasks until the first title, then each section
         let mut counts = [0usize; 3];
@@ -241,20 +249,7 @@ impl App {
                 _ => counts[section] += 1,
             }
         }
-        let mut spans = Vec::new();
-        for (i, name) in self.projects.iter().map(|p| &p.name).enumerate() {
-            if i > 0 {
-                spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
-            }
-            spans.push(if i == self.project {
-                Span::styled(
-                    format!(" {name} "),
-                    Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
-                )
-            } else {
-                Span::styled(format!(" {name} "), Style::default().fg(Color::DarkGray))
-            });
-        }
+        let mut spans = vec![self.dropdown()];
         spans.extend([
             Span::styled(
                 if self.config.jira.is_some() {
@@ -321,6 +316,7 @@ impl App {
         let text = vec![
             "↑↓ j k     move             ← h  fold / to parent        → l  unfold        space  fold",
             "z          fold all / unfold all",
+            "↑ at top   project dropdown: ⏎ opens it, ⏎ on \"+ new project\" adds one   Tab ] [  next / previous project",
             "⏎          agent: focus; worktree: its agent or claude --resume; task: wt select",
             "b          ticket / MR in the browser   o  note in Obsidian       e  note in $EDITOR",
             "i          worktree in IntelliJ IDEA ([workflow] ide); on a task: its only worktree",

@@ -39,6 +39,8 @@ pub(super) enum Dialog {
     Hide { selected: usize },
     /// "+ new task": the form for `wt start`.
     NewTask(super::new_task::Form),
+    /// "+ new project" in the project dropdown.
+    NewProject(super::project::Form),
 }
 
 impl Dialog {
@@ -401,6 +403,7 @@ impl App {
             },
             Some(Dialog::Hide { selected }) => self.on_hide_key(key, selected),
             Some(Dialog::NewTask(form)) => self.on_new_task_key(key, form),
+            Some(Dialog::NewProject(form)) => self.on_new_project_key(key, form),
             Some(Dialog::Report(mut report)) => {
                 if report.question.is_some() {
                     answer(&mut report, key);
@@ -486,6 +489,11 @@ impl App {
                 "new task",
                 super::new_task::lines(form),
                 super::new_task::hint(form),
+            ),
+            Dialog::NewProject(form) => (
+                "new project",
+                super::project::lines(form),
+                super::project::HINT,
             ),
             Dialog::Hide { selected } => (
                 "show",

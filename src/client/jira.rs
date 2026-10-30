@@ -1,18 +1,16 @@
 use std::time::Duration;
 
-use crate::client::jira::JiraError::RequestResultError;
 use chrono::{DateTime, FixedOffset};
 use reqwest::StatusCode;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct JiraClient {
     client: Client,
     base_url: String,
-    token: String,
 }
 
 #[derive(Debug, Error)]
@@ -20,61 +18,163 @@ pub enum JiraError {
     #[error("failed during request execution: {0}")]
     RequestExecutionError(#[from] reqwest::Error),
 
-    #[error("git command exited with status {0}")]
+    /// The status and the start of the response body.
+    #[error("Jira answered {0}: {1}")]
     RequestResultError(StatusCode, String),
+
+    #[error("JIRA_TOKEN can't be sent in a header: {0}")]
+    BadToken(#[from] reqwest::header::InvalidHeaderValue),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, JiraError>;
 
+impl JiraError {
+    /// Jira refused the query itself (400), e.g. a `key in (…)` with an unknown key.
+    pub fn bad_request(&self) -> bool {
+        matches!(self, JiraError::RequestResultError(status, _) if *status == StatusCode::BAD_REQUEST)
+    }
+
+    /// No such issue, or not one I may see (404).
+    pub fn not_found(&self) -> bool {
+        matches!(self, JiraError::RequestResultError(status, _) if *status == StatusCode::NOT_FOUND)
+    }
+}
+
+/// How much of an error response goes into the message: Jira answers with whole
+/// HTML pages.
+const ERROR_BODY_CHARS: usize = 300;
+
+/// The response when it is a success, otherwise its status and body as an error.
+fn checked(response: Response) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let text = response.text().unwrap_or_default();
+    let mut body: String = text.trim().chars().take(ERROR_BODY_CHARS).collect();
+    if body.len() < text.trim().len() {
+        body.push('…');
+    }
+    Err(JiraError::RequestResultError(status, body))
+}
+
 impl JiraClient {
-    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
-        JiraClient {
-            client: Client::new(),
-            base_url: base_url.into(),
-            token: token.into(),
-        }
-    }
-
-    fn auth_headers(&self) -> HeaderMap {
+    /// The token is trimmed: one read from a file or a shell often ends in a newline.
+    pub fn new(base_url: impl Into<String>, token: &str) -> Result<Self> {
         let mut headers = HeaderMap::new();
-        let auth_value = format!("Bearer {}", self.token);
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth_value).unwrap());
+        let mut auth = HeaderValue::from_str(&format!("Bearer {}", token.trim()))?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers
+        let client = Client::builder()
+            .default_headers(headers)
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        Ok(JiraClient {
+            client,
+            base_url: base_url.into(),
+        })
     }
 
-    fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+    /// A client with the token from `JIRA_TOKEN`.
+    pub fn from_env(base_url: &str) -> std::result::Result<Self, String> {
+        let token = std::env::var("JIRA_TOKEN").map_err(|_| "JIRA_TOKEN is not set".to_string())?;
+        JiraClient::new(base_url, &token).map_err(|err| err.to_string())
+    }
+
+    fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
+        let response = self.client.get(url).query(query).send()?;
+        Ok(checked(response)?.json()?)
+    }
+
+    /// The workflow transitions available on the issue now.
+    pub fn transitions(&self, key: &str) -> Result<Vec<Transition>> {
+        let url = format!("{}/rest/api/2/issue/{}/transitions", self.base_url, key);
+        let result: Transitions = self.get_json(&url, &[])?;
+        Ok(result.transitions)
+    }
+
+    pub fn transition(&self, key: &str, transition_id: &str) -> Result<()> {
+        let url = format!("{}/rest/api/2/issue/{}/transitions", self.base_url, key);
         let response = self
             .client
-            .get(url)
-            .headers(self.auth_headers())
-            .timeout(Duration::from_secs(5))
+            .post(&url)
+            .timeout(Duration::from_secs(10))
+            .json(&serde_json::json!({ "transition": { "id": transition_id } }))
             .send()?;
+        checked(response).map(|_| ())
+    }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().unwrap_or_default();
-            return Err(RequestResultError(
-                status,
-                format!("Request failed ({}): {}", status, text).into(),
-            ));
-        }
-
-        Ok(response.json()?)
+    /// Creates a ticket assigned to me; returns its key.
+    pub fn create_issue(&self, project: &str, issue_type: &str, summary: &str) -> Result<String> {
+        let me: Myself = self.get_json(&format!("{}/rest/api/2/myself", self.base_url), &[])?;
+        let url = format!("{}/rest/api/2/issue", self.base_url);
+        let fields = serde_json::json!({
+            "project": { "key": project },
+            "issuetype": { "name": issue_type },
+            "summary": summary,
+            "assignee": { "name": me.name },
+        });
+        let response = self
+            .client
+            .post(&url)
+            .timeout(Duration::from_secs(10))
+            .json(&serde_json::json!({ "fields": fields }))
+            .send()?;
+        let created: Created = checked(response)?.json()?;
+        Ok(created.key)
     }
 
     pub fn get_issue_by_key(&self, key: &str) -> Result<JiraIssue> {
         let url = format!("{}/rest/api/2/issue/{}", self.base_url, key);
-        self.get_json(&url)
+        self.get_json(&url, &[])
     }
 
-    pub fn search_issues(&self, jql: &str) -> Result<Vec<JiraIssue>> {
-        let encoded_jql = urlencoding::encode(jql);
-        let url = format!("{}/rest/api/2/search?jql={}", self.base_url, encoded_jql);
-
-        let result: JiraSearchResult = self.get_json(&url)?;
+    /// Search returning only the fields `JiraIssue` needs, up to `max` issues.
+    pub fn search_issues_brief(&self, jql: &str, max: usize) -> Result<Vec<JiraIssue>> {
+        let url = format!("{}/rest/api/2/search", self.base_url);
+        let max = max.to_string();
+        let query = [
+            ("jql", jql),
+            ("maxResults", max.as_str()),
+            ("fields", "summary,status,created,updated,assignee"),
+        ];
+        let result: JiraSearchResult = self.get_json(&url, &query)?;
         Ok(result.issues)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct Myself {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Created {
+    key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Transitions {
+    transitions: Vec<Transition>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Transition {
+    pub id: String,
+    pub name: String,
+    pub to: TransitionTarget,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransitionTarget {
+    pub name: String,
+    #[serde(rename = "statusCategory")]
+    pub status_category: StatusCategory,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,13 +185,18 @@ struct JiraSearchResult {
 #[derive(Debug, Deserialize)]
 pub struct JiraIssue {
     pub key: String,
-    pub id: String,
-    #[serde(rename = "self")]
-    pub self_link: String,
     pub fields: JiraIssueFields,
 }
 
 impl JiraIssue {
+    pub fn status_category(&self) -> Category {
+        self.fields
+            .status
+            .as_ref()
+            .and_then(|s| s.status_category.as_ref())
+            .map_or(Category::Unknown, |c| c.key)
+    }
+
     pub fn status(&self) -> &str {
         self.fields
             .status
@@ -106,50 +211,30 @@ pub struct JiraIssueFields {
     pub summary: String,
     pub description: Option<String>,
     pub created: DateTime<FixedOffset>,
-    pub updated: DateTime<FixedOffset>,
-    pub status: Option<Status>,
-    pub assignee: Option<Assignee>,
-    pub subtasks: Option<Vec<JiraSubtask>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct JiraSubtask {
-    pub key: String,
-    pub id: String,
-    #[serde(rename = "self")]
-    pub self_link: String,
-    pub fields: JiraSubtaskFields,
-}
-
-impl JiraSubtask {
-    pub fn status(&self) -> &str {
-        self.fields
-            .status
-            .as_ref()
-            .map(|s| s.name.as_str())
-            .unwrap_or("unknown")
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct JiraSubtaskFields {
-    pub summary: String,
     pub status: Option<Status>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Status {
-    pub description: String,
     pub name: String,
-    pub id: String,
+    #[serde(rename = "statusCategory")]
+    pub status_category: Option<StatusCategory>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Assignee {
-    pub name: String,
-    #[serde(rename = "emailAddress")]
-    pub email_address: String,
-    #[serde(rename = "displayName")]
-    pub display_name: String,
-    pub active: bool,
+pub struct StatusCategory {
+    pub key: Category,
+}
+
+/// Jira's coarse status, the `statusCategory` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub enum Category {
+    #[serde(rename = "new")]
+    New,
+    #[serde(rename = "indeterminate")]
+    InProgress,
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "undefined", other)]
+    Unknown,
 }

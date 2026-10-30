@@ -1,273 +1,249 @@
-use crate::client::gitlab::MergeRequest;
-use crate::client::jira::{JiraIssue, JiraSubtask};
-use crate::config::load_config;
-use crate::core::JiraGitlabState;
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
-use dialoguer::theme::ColorfulTheme;
-use dialoguer::FuzzySelect;
-use std::collections::HashMap;
+use crate::client::agent::AgentKind;
+mod progress;
+mod table;
+pub(crate) mod work;
+
+use crate::config::{Config, choose_project, load_projects, project_of};
+use crate::vault::task::Task;
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
-use std::{fmt, io};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(name = "wt", author, version, long_about = None)]
+/// Tasks, Jira tickets, merge requests and worktrees in one table
 pub struct Cli {
+    /// The project; default: the one the current directory is in, else the first
+    #[arg(long, short = 'p', global = true)]
+    project: Option<String>,
+    /// CLI for new work; on select, focus/resume only this CLI's conversations
+    #[arg(long, global = true, value_enum)]
+    agent: Option<AgentKind>,
+    /// Without a command: the TUI
     #[command(subcommand)]
-    command: CliCommands,
-
-    #[arg(long = "repo", short = 'r', default_value = ".", global = true)]
-    repo_path: PathBuf,
+    command: Option<CliCommands>,
 }
 
 #[derive(Subcommand, Debug)]
 enum CliCommands {
-    List {
-        #[command(subcommand)]
-        list_option: Option<ListOption>,
-    },
-    Switch {
-        #[arg(long, short = 'k')]
-        key: Option<String>,
-    },
-    Info {
-        #[arg(long, short = 'k')]
-        key: String,
-    },
+    /// The TUI, as `wt` without a command
     Tui {},
 
+    /// Start new work. `wt start "<task name>"`: a task note, its herdr workspace
+    /// and a worktree tab with the selected agent briefed from the note and the first ticket.
+    /// `wt start UCP-123`: the same, the task named after the ticket's summary
+    Start(StartArgs),
+    /// Add a ticket to a task, with its own worktree tab in the task's workspace
+    Add(AddArgs),
+    /// Put a ticket into a task without starting work on it (no worktree)
+    Attach {
+        key: String,
+        /// The task; a picker when omitted
+        task: Option<String>,
+    },
+    /// Go back to a task: its agent, or its CLI resuming the last session there
+    Select(SelectArgs),
+    /// (internal) Run in a new tab by start/add: create the worktree, then the agent
+    #[command(hide = true)]
+    Prepare { spec: PathBuf },
+    /// (for agents) Append a finding to the task note's "Agent notes"
+    Note {
+        #[arg(trailing_var_arg = true, required = true)]
+        text: Vec<String>,
+    },
+    /// Tasks with their tickets, merge requests, worktrees and agents; then work
+    /// that belongs to no task. Updates `state` and `sessions` in task notes.
+    Status(StatusArgs),
+    /// Start a reviewer agent next to the task's agent
+    Review { name: Option<String> },
+    /// Close a task: `wt done "<task>"` (or a ticket of it) removes its finished
+    /// worktrees, closes my tickets in Jira and marks the note done. With a
+    /// worktree name, or none inside one: remove that worktree
+    Done(DoneArgs),
+    /// Shell completion script
     Completions {
         #[arg(value_enum)]
         shell: Shell,
     },
 }
 
-#[derive(Subcommand, Debug)]
-enum ListOption {
-    Mr,
-    Task,
-    All,
+// The arguments of the bigger commands, handed to them whole. No doc comments
+// on the structs: clap would take them for the commands' help.
+
+#[derive(Args, Debug, Default)]
+pub(crate) struct StartArgs {
+    /// Task name or ticket key; a picker when omitted
+    pub(crate) target: Option<String>,
+    /// Tickets of the new task, the first one gets the worktree
+    #[arg(long = "ticket", short = 'k')]
+    pub(crate) tickets: Vec<String>,
+    #[arg(long = "tag", short = 't')]
+    pub(crate) tags: Vec<String>,
+    /// The goal: first line of the note and the agent's brief
+    #[arg(long, short = 'm')]
+    pub(crate) message: Option<String>,
+    /// Worktree, tab and agent name; default: from the ticket summary
+    #[arg(long, short = 'n')]
+    pub(crate) name: Option<String>,
+    /// Default: <branch_prefix><KEY>-<name>
+    #[arg(long, short = 'b')]
+    pub(crate) branch: Option<String>,
+    /// Don't switch to the new tab
+    #[arg(long)]
+    pub(crate) bg: bool,
+    /// Create a Jira ticket named after the task, assigned to me
+    /// (the project's `jira.project`, `jira.issue_type`)
+    #[arg(long)]
+    pub(crate) new_ticket: bool,
+    /// No worktree: the agent works in the main checkout
+    #[arg(long)]
+    pub(crate) no_worktree: bool,
+    /// No agent: the worktree tab gets a shell. With --no-worktree too, only
+    /// the note
+    #[arg(long)]
+    pub(crate) no_agent: bool,
+}
+
+#[derive(Args, Debug, Default)]
+pub(crate) struct AddArgs {
+    /// [<task>] <KEY>; the task defaults to the current one
+    #[arg(num_args = 1..=2, required = true)]
+    pub(crate) args: Vec<String>,
+    /// Run the agent in this existing worktree of the task (stacked MRs)
+    #[arg(long = "in")]
+    pub(crate) in_tree: Option<String>,
+    #[arg(long, short = 'n')]
+    pub(crate) name: Option<String>,
+    #[arg(long, short = 'm')]
+    pub(crate) message: Option<String>,
+    #[arg(long)]
+    pub(crate) bg: bool,
+}
+
+#[derive(Args, Debug, Default)]
+pub(crate) struct SelectArgs {
+    /// Task name or ticket key; a picker when omitted
+    pub(crate) target: Option<String>,
+    /// That worktree of the task; for a task without any, the name of its
+    /// first one
+    #[arg(long)]
+    pub(crate) tree: Option<String>,
+    /// Pick which of the task's sessions to resume
+    #[arg(long)]
+    pub(crate) session: bool,
+    /// Start a fresh conversation, even if an agent or saved session exists
+    #[arg(long = "new", conflicts_with = "session")]
+    pub(crate) new_session: bool,
+    /// Don't switch to it
+    #[arg(long)]
+    pub(crate) bg: bool,
+}
+
+#[derive(Args, Debug)]
+struct StatusArgs {
+    /// Only tasks with this tag
+    #[arg(long, short = 't')]
+    tag: Option<String>,
+    /// Also done tasks, tickets with their status, merged MRs, finished
+    /// worktrees and tickets without activity
+    #[arg(long, short = 'a')]
+    all: bool,
+    /// Don't update task notes
+    #[arg(long)]
+    no_write: bool,
+}
+
+#[derive(Args, Debug)]
+struct DoneArgs {
+    name: Option<String>,
+    /// Remove every clean worktree whose MR is merged or closed
+    #[arg(long)]
+    merged: bool,
+    /// Skip the uncommitted / open MR / unpushed checks
+    #[arg(long, short = 'f')]
+    force: bool,
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
-    let config = load_config().map_err(|err| err.to_string())?;
-
-    let state = JiraGitlabState::new(
-        cli.repo_path,
-        config.jira,
-        config.gitlab,
-    )
-    .map_err(|err| err.to_string())?;
-
-    match cli.command {
-        CliCommands::List { list_option } => cli_list(&state, list_option)?,
-        CliCommands::Switch { key } => select_mr(&state, key)?,
-        CliCommands::Info { key } => cli_info(&state, key)?,
-        CliCommands::Tui {} => todo!(),
-        CliCommands::Completions { shell } => cli_completion(shell)?,
-    }
-
-    Ok(())
-}
-
-//TODO fix returns completion for jira-gitlab not jg
-fn cli_completion(shell: Shell) -> Result<(), String> {
-    let mut cmd = Cli::command(); // get clap Command
-    let bin_name = cmd.get_name().to_string();
-    generate(shell, &mut cmd, bin_name, &mut io::stdout());
-    Ok(())
-}
-
-fn cli_info(state: &JiraGitlabState, key: String) -> Result<(), String> {
-    let issue = state
-        .find_issue_by_key(key.as_ref())
-        .map_err(|err| err.to_string())?;
-
-    let mrs = state
-        .find_merge_request_by_key(key.as_ref())
-        .map_err(|err| err.to_string())?;
-
-    if let None = issue {
-        return Err(format!("No issue found with key: {}", key));
-    }
-
-    let issue = issue.unwrap();
-
-    let link = task_hyperlink(issue.key.as_ref());
-    let fields = &issue.fields;
-
-    println!("{} {}", link, fields.summary);
-    println!("status: {}", issue.status());
-
-    if let Some(description) = &fields.description {
-        println!("\ndescription:");
-        println!("{}", description);
-    }
-
-    if let Some(assignee) = &fields.assignee {
-        println!("\nassignee: {}", assignee.display_name);
-    }
-
-    if let Some(subtasks) = &fields.subtasks {
-        println!("\nsubtasks:");
-        for subtask in subtasks {
-            println!("{}", subtask);
+    let mut projects = load_projects().map_err(|err| err.to_string())?;
+    if let Some(agent) = cli.agent {
+        for project in &mut projects {
+            project.workflow.agent = agent;
+            project.workflow.agent_override = Some(agent);
         }
     }
-
-    Ok(())
-}
-
-fn cli_list(state: &JiraGitlabState, list_option: Option<ListOption>) -> Result<(), String> {
-    match list_option.unwrap_or(ListOption::All) {
-        ListOption::Mr => list_mrs(&state),
-        ListOption::Task => list_jira_tasks(&state),
-        ListOption::All => list_jira_tasks_with_mr(&state),
-    }
-
-    Ok(())
-}
-
-fn list_mrs(state: &JiraGitlabState) {
-    let mrs = state
-        .list_merge_request()
-        .expect("Failed to list merge requests");
-
-    println!("Merge requests:");
-    for mr in mrs {
-        println!("{}", display_mr(&mr, true))
-    }
-}
-
-fn list_jira_tasks_with_mr(state: &JiraGitlabState) {
-    let issues = state.unresolved_current_user_issues();
-
-    if let Err(e) = issues {
-        println!("Error while issues search: {}", e);
-        return;
-    }
-
-    let mrs: HashMap<String, Vec<MergeRequest>> = state
-        .list_merge_request()
-        .expect("Failed to get merge request")
-        .into_iter()
-        .filter_map(|mr| mr.extract_task().map(|task| (task, mr)))
-        .fold(HashMap::new(), |mut acc, (task, mr)| {
-            acc.entry(task).or_insert_with(Vec::new).push(mr);
-            acc
-        });
-
-    display_tasks_mr(issues.unwrap(), mrs);
-}
-
-fn list_jira_tasks(state: &JiraGitlabState) {
-    let issues = state.unresolved_current_user_issues();
-
-    if let Err(e) = issues {
-        println!("Error while issues search: {}", e);
-        return;
-    }
-
-    display_tasks_mr(issues.unwrap(), HashMap::new());
-}
-
-fn display_tasks_mr(issues: Vec<JiraIssue>, mrs: HashMap<String, Vec<MergeRequest>>) {
-    let issues = issues;
-    println!("Current issues:");
-    for issue in issues {
-        print!("{}", issue);
-
-        if let Some(mrs_for_issue) = mrs.get(&issue.key) {
-            for mr in mrs_for_issue {
-                println!("\t   {}", display_mr(mr, true));
-            }
+    let cwd = std::env::current_dir().ok();
+    let command = match cli.command {
+        None | Some(CliCommands::Tui {}) => {
+            // the TUI opens on the last project it showed, unless told or in one
+            let start = match &cli.project {
+                Some(name) => Some(choose_project(&projects, Some(name), None)?),
+                None => cwd.as_deref().and_then(|d| project_of(&projects, d)),
+            };
+            return crate::tui::run(projects, start);
         }
-
-        if let Some(subtasks) = &issue.fields.subtasks {
-            for subtask in subtasks {
-                println!("   └─ {}", subtask);
-            }
+        Some(command) => command,
+    };
+    let chosen = choose_project(&projects, cli.project.as_deref(), cwd.as_deref())?;
+    let config = projects.swap_remove(chosen);
+    match command {
+        CliCommands::Status(args) => table::cli_status(&config, args),
+        CliCommands::Start(args) => work::cli_start(&config, args),
+        CliCommands::Add(args) => work::cli_add(&config, args),
+        CliCommands::Select(args) => work::cli_select(&config, args),
+        CliCommands::Note { text } => work::cli_note(&config, text),
+        CliCommands::Prepare { spec } => work::cli_prepare(&spec),
+        CliCommands::Attach { key, task } => work::cli_attach(&config, &key, task),
+        CliCommands::Review { name } => work::cli_review(&config, name),
+        CliCommands::Done(args) => work::cli_done(&config, args),
+        CliCommands::Completions { shell } => {
+            generate(shell, &mut Cli::command(), "wt", &mut io::stdout());
+            Ok(())
         }
+        CliCommands::Tui {} => unreachable!(),
     }
 }
 
-fn select_mr(state: &JiraGitlabState, key: Option<String>) -> Result<(), String> {
-    let mut mrs = state.list_merge_request().map_err(|e| e.to_string())?;
-
-    if let Some(key) = key {
-        mrs = mrs
-            .into_iter()
-            .filter(|it| it.title().contains(&key))
-            .collect();
+/// The vault's tasks; notes that can't be read are reported and left out.
+fn load(config: &Config) -> Result<Vec<Task>, String> {
+    let (tasks, skipped) = crate::vault::task::load(config)?;
+    for err in skipped {
+        eprintln!("skipped {err}");
     }
-
-    let mr_strings: Vec<String> = mrs.iter().map(|it| display_mr(it, false)).collect();
-
-    let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
-        .with_prompt("Merge Requests:")
-        .items(&mr_strings)
-        .interact_opt()
-        .expect("Failed to select merge requests")
-        .expect("Merge requests wasn't selected");
-
-    println!("Checkout to {}", mrs[selection].source_branch());
-
-    let branch = mrs[selection].source_branch();
-
-    state
-        .checkout_to(branch)
-        .expect("Failed to checkout branch");
-
-    Ok(())
+    Ok(tasks)
 }
 
-impl JiraGitlabState {
-    // fn create_mr(&self, task_key: String, title: String) {
-    //     let jira_task = self
-    //         .find_issue_by_key(task_key.as_ref())
-    //         .expect("Failed to find issue by key")
-    //         .expect("Can't find issue by key");
-    //
-    //     let branch_name = format!("iudalov-{}-{}", jira_task.key, title);
-    //
-    //     // self.create_merge_request()()
-    // }
+/// Colors on a terminal only, and never with NO_COLOR set.
+fn colors(stream: &impl IsTerminal) -> bool {
+    stream.is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
-impl fmt::Display for JiraIssue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let link = task_hyperlink(self.key.as_ref());
-        let summary = &self.fields.summary;
-        writeln!(f, "📌 {}  [{}] \t{}", link, self.status(), summary)?;
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
 
-        Ok(())
+    #[test]
+    fn agent_can_be_selected_before_or_after_subcommand() {
+        for args in [
+            vec!["wt", "--agent", "codex", "start", "task"],
+            vec!["wt", "start", "task", "--agent", "codex"],
+            vec!["wt", "review", "--agent", "codex"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap().agent,
+                Some(AgentKind::Codex)
+            );
+        }
+        assert_eq!(
+            Cli::try_parse_from(["wt", "--agent", "claude"])
+                .unwrap()
+                .agent,
+            Some(AgentKind::Claude)
+        );
+        assert!(Cli::try_parse_from(["wt", "--agent", "other"]).is_err());
     }
-}
-
-impl fmt::Display for JiraSubtask {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let link = task_hyperlink(self.key.as_ref());
-        let summary = &self.fields.summary;
-        write!(f, "🔹 {}  [{}] \t{}", link, self.status(), summary)?;
-
-        Ok(())
-    }
-}
-
-fn display_mr(mr: &MergeRequest, use_hyperlink: bool) -> String {
-    let format_text = format!("[{}] {} - {}", mr.state(), mr.title(), mr.source_branch());
-    if use_hyperlink {
-        return hyperlink(mr.web_url(), format_text.as_str());
-    }
-    format_text
-}
-
-fn task_hyperlink(text: &str) -> String {
-    let url = "https://jira.vk.team/browse/";
-    hyperlink(format!("{}{}", url, text).as_str(), text)
-}
-
-fn hyperlink(url: &str, text: &str) -> String {
-    format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, text)
 }

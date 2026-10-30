@@ -10,14 +10,41 @@ model and the decisions.
 
 ## Install
 
+As a [Herdr plugin](https://herdr.dev/docs/plugins/) (Herdr 0.7.4+, Rust/Cargo,
+macOS or Linux):
+
+```sh
+herdr plugin install aetoneilya/task-branch
+herdr plugin config-dir worktable
+```
+
+Herdr builds a private copy of `wt`; no global `cargo install` is needed.
+Create `config.toml` in the directory printed by `config-dir` (example below).
+An existing standalone config also works. Open the board with the
+`worktable.open` action or the keybinding below.
+
+For local development:
+
+```sh
+cargo build --release --locked
+herdr plugin link "$PWD"
+```
+
+Rebuild after changes; `plugin link` does not run the manifest's build command.
+Once published, `herdr plugin update worktable` updates a GitHub installation.
+
+The standalone CLI is also available:
+
 ```
 cargo install --path . --locked
 ```
 
 ## Config
 
-`~/.config/worktable/config.toml` (`$XDG_CONFIG_HOME/worktable/config.toml`, or
-the path in `WORKTABLE_CONFIG`):
+Config lookup order: `WORKTABLE_CONFIG`, an existing
+`$HERDR_PLUGIN_CONFIG_DIR/config.toml` when running as a plugin, then
+`~/.config/worktable/config.toml` (`$XDG_CONFIG_HOME/worktable/config.toml`).
+The plugin and standalone command share the existing worktable cache.
 
 ```toml
 [vault]
@@ -53,7 +80,10 @@ directory is in, else the first. The TUI opens on the last one shown; ↑ from t
 top of the list gets to the project dropdown, ⏎ opens it, and its "+ new project"
 appends a `[[project]]` here. `[` `]` and Tab switch at once.
 
-Tokens come from `JIRA_TOKEN` and `GITLAB_TOKEN`. `WT_TRACE=1` prints how long
+Tokens come from `JIRA_TOKEN` and `GITLAB_TOKEN`. The plugin popup starts through
+your interactive `$SHELL`, so tokens exported by its startup files are available.
+New task tabs inherit the selected config and put this plugin's `wt` on `PATH`
+for agent commands such as `wt note`. `WT_TRACE=1` prints how long
 each fetch, the matching and the rendering took to stderr.
 
 ## Commands
@@ -89,12 +119,19 @@ wt completions <shell>     shell completion script
 
 ## herdr popup
 
-In herdr's config, `prefix+t` opens the TUI as a popup; going to some work
-closes it:
+In Herdr's config, bind `prefix+t` to the installed plugin action. Replace any
+existing `prefix+t` command with this block. The popup uses 90% of the terminal;
+going to some work closes it:
 
 ```toml
 [[keys.command]]
 key = "prefix+t"
-type = "popup"
-command = "zsh -ic 'WT_POPUP=1 exec wt'"
+type = "plugin_action"
+command = "worktable.open"
+description = "worktable"
 ```
+
+Reload Herdr's config after changing the binding. The board can also be opened
+with `herdr plugin action invoke worktable.open`. The project defaults to the
+original pane's directory, even though Herdr launches plugins from their own
+checkout. The CLI remains usable outside Herdr.

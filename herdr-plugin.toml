@@ -1,0 +1,23 @@
+id = "worktable"
+name = "Worktable"
+version = "0.1.0"
+min_herdr_version = "0.7.4"
+description = "Tasks, tickets, merge requests, worktrees and agents in one table"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[actions]]
+id = "open"
+title = "Open worktable"
+contexts = ["workspace"]
+command = ["./target/release/wt", "plugin-open"]
+
+[[panes]]
+id = "board"
+title = "Worktable"
+placement = "popup"
+width = "90%"
+height = "90%"
+command = ["sh", "scripts/popup.sh"]

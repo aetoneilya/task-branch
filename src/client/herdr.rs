@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
@@ -25,13 +26,45 @@ pub fn available() -> bool {
 
 /// herdr's stdout, or its stderr as the error.
 fn herdr_output(args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("herdr").args(args).output()?;
+    let output = Command::new(herdr_bin()).args(args).output()?;
     if !output.status.success() {
         return Err(HerdrError::NonZeroExit(
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
     }
     Ok(output.stdout)
+}
+
+fn herdr_bin() -> OsString {
+    std::env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into())
+}
+
+/// Plugin actions and panes start in the plugin checkout, not the caller's repo.
+pub fn caller_dir() -> Option<PathBuf> {
+    let context = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok()?;
+    let context: serde_json::Value = serde_json::from_str(&context).ok()?;
+    [
+        "/focused_pane_cwd",
+        "/worktree/checkout_path",
+        "/workspace_cwd",
+    ]
+    .iter()
+    .filter_map(|key| context.pointer(key).and_then(|v| v.as_str()))
+    .find(|path| !path.is_empty())
+    .map(PathBuf::from)
+}
+
+pub fn open_board() -> Result<()> {
+    run_herdr(&[
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        "worktable",
+        "--entrypoint",
+        "board",
+    ])
+    .map(|_| ())
 }
 
 fn run_herdr(args: &[&str]) -> Result<serde_json::Value> {
@@ -167,7 +200,21 @@ pub fn create_workspace(label: &str, cwd: &Path) -> Result<(String, String)> {
 
 /// Types `command` and Enter into the shell of `pane`.
 pub fn run_in_pane(pane: &str, command: &str) -> Result<()> {
-    herdr_output(&["pane", "run", pane, command]).map(|_| ())
+    let command = if std::env::var_os("HERDR_PLUGIN_ROOT").is_some() {
+        // Run after the pane's login shell has initialized, so its startup files
+        // cannot hide this installation of wt. Agents inherit it for `wt note`.
+        let exe = std::env::current_exe()?;
+        let bin = exe.parent().unwrap_or(Path::new("."));
+        format!(
+            "export PATH={}:\"$PATH\"; export WORKTABLE_CONFIG={}; export HERDR_BIN_PATH={}; {command}",
+            shell_quote(&bin.to_string_lossy()),
+            shell_quote(&crate::config::config_path().to_string_lossy()),
+            shell_quote(&herdr_bin().to_string_lossy()),
+        )
+    } else {
+        command.to_string()
+    };
+    herdr_output(&["pane", "run", pane, &command]).map(|_| ())
 }
 
 /// Names the agent `pane` will host once herdr detects it, in the background:
@@ -177,9 +224,10 @@ pub fn name_agent_when_up(pane: &str, name: &str) -> Result<()> {
     Command::new("sh")
         .args([
             "-c",
-            r#"i=0; while [ $i -lt 120 ]; do herdr agent rename "$0" "$1" >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 0.5; done"#,
+            r#"i=0; while [ $i -lt 120 ]; do "$2" agent rename "$0" "$1" >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 0.5; done"#,
             pane,
             name,
+            &herdr_bin().to_string_lossy(),
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

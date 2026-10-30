@@ -23,6 +23,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum CliCommands {
+    /// (internal) Open the Herdr plugin's board without loading project config.
+    #[command(hide = true)]
+    PluginOpen,
     /// The TUI, as `wt` without a command
     Tui {},
 
@@ -162,6 +165,13 @@ struct DoneArgs {
 
 pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    if matches!(cli.command, Some(CliCommands::PluginOpen)) {
+        return crate::client::herdr::open_board().map_err(|e| e.to_string());
+    }
+    if let Some(dir) = crate::client::herdr::caller_dir() {
+        std::env::set_current_dir(&dir)
+            .map_err(|e| format!("can't enter {}: {e}", dir.display()))?;
+    }
     let mut projects = load_projects().map_err(|err| err.to_string())?;
     let cwd = std::env::current_dir().ok();
     let command = match cli.command {
@@ -192,6 +202,7 @@ pub fn run() -> Result<(), String> {
             Ok(())
         }
         CliCommands::Tui {} => unreachable!(),
+        CliCommands::PluginOpen => unreachable!(),
     }
 }
 

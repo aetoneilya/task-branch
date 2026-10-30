@@ -10,6 +10,25 @@ model and the decisions.
 
 ## Install
 
+As a local Herdr plugin:
+
+```sh
+sh scripts/install-plugin.sh
+```
+
+This builds and registers a private copy in
+`${XDG_DATA_HOME:-~/.local/share}/worktable/herdr-plugin`. The plugin stays available
+after the task worktree is removed. Run the installer again to deploy changes;
+the standalone `wt` is unaffected. Optional arguments select the install directory
+and Herdr session: `sh scripts/install-plugin.sh /absolute/plugin/path default`.
+
+The plugin opens the board as a 90% popup via `worktable.open`. Its config lookup
+is `WORKTABLE_CONFIG`, then an existing
+`$HERDR_PLUGIN_CONFIG_DIR/config.toml`, then the standalone config below.
+New task tabs inherit the selected config and plugin binary on `PATH` for `wt note`.
+
+For a standalone CLI:
+
 ```
 cargo install --path . --locked
 ```
@@ -127,12 +146,13 @@ under `<repo>/.claude/worktrees/` for both tools.
 
 ## herdr popup
 
-In herdr's config, `prefix+t` opens the TUI as a popup; going to some work
-closes it:
+After installing the plugin, bind `prefix+t` in Herdr's config and reload the
+config. Going to some work closes the popup:
 
 ```toml
 [[keys.command]]
 key = "prefix+t"
-type = "popup"
-command = "zsh -ic 'WT_POPUP=1 exec wt'"
+type = "plugin_action"
+command = "worktable.open"
+description = "worktable"
 ```

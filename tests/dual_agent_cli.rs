@@ -165,14 +165,28 @@ try:
     os.write(master, sys.argv[2].encode() + b'n')
     wait_for(b'New agent')
     screen = b''
-    os.write(master, sys.argv[3].encode())
+    # Crossterm decodes Esc+Esc as Escape without waiting for another byte.
+    # A bare Esc followed by the cleanup q could otherwise become Alt-q.
+    os.write(master, b'\x1b\x1b' if sys.argv[3] == '\x1b' else sys.argv[3].encode())
     if sys.argv[4]:
         wait_for(b'Worktree')
         screen = b''
         os.write(master, sys.argv[4].encode())
-    wait_for(b'cancelled' if sys.argv[3] == '\x1b' else b'tab task')
-    os.write(master, b'q')
-    process.wait(timeout=10)
+    if sys.argv[3] != '\x1b':
+        wait_for(b'tab task')
+    # Drain the PTY while closing; refresh output can fill its buffer.
+    # Cancellation may finish between frames, replacing its transient footer.
+    deadline, next_quit = time.monotonic() + 10, 0
+    while process.poll() is None:
+        assert time.monotonic() < deadline, screen[-6000:]
+        if time.monotonic() >= next_quit:
+            os.write(master, b'q')
+            next_quit = time.monotonic() + 0.25
+        if select.select([master], [], [], 0.1)[0]:
+            try:
+                screen += os.read(master, 65536)
+            except OSError:
+                process.wait(timeout=1)
     assert process.returncode == 0, screen
 finally:
     if process.poll() is None:

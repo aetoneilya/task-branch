@@ -180,8 +180,8 @@ pub fn expand_home(path: &Path) -> PathBuf {
     }
 }
 
-/// `$WORKTABLE_CONFIG`, else `worktable/config.toml` in the config dir.
-fn config_path() -> PathBuf {
+/// Explicit config, then an existing plugin config, then the standalone config.
+pub(crate) fn config_path() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
@@ -190,6 +190,11 @@ fn config_path() -> PathBuf {
 
     std::env::var_os("WORKTABLE_CONFIG")
         .map(PathBuf::from)
+        .or_else(|| {
+            let path =
+                PathBuf::from(std::env::var_os("HERDR_PLUGIN_CONFIG_DIR")?).join("config.toml");
+            path.is_file().then_some(path)
+        })
         .unwrap_or_else(|| base.join("worktable").join("config.toml"))
 }
 

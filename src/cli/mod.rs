@@ -1,3 +1,4 @@
+use crate::client::agent::AgentKind;
 mod progress;
 mod table;
 pub(crate) mod work;
@@ -16,6 +17,9 @@ pub struct Cli {
     /// The project; default: the one the current directory is in, else the first
     #[arg(long, short = 'p', global = true)]
     project: Option<String>,
+    /// CLI for new work; on select, focus/resume only this CLI's conversations
+    #[arg(long, global = true, value_enum)]
+    agent: Option<AgentKind>,
     /// Without a command: the TUI
     #[command(subcommand)]
     command: Option<CliCommands>,
@@ -27,7 +31,7 @@ enum CliCommands {
     Tui {},
 
     /// Start new work. `wt start "<task name>"`: a task note, its herdr workspace
-    /// and a worktree tab with claude briefed from the note and the first ticket.
+    /// and a worktree tab with the selected agent briefed from the note and the first ticket.
     /// `wt start UCP-123`: the same, the task named after the ticket's summary
     Start(StartArgs),
     /// Add a ticket to a task, with its own worktree tab in the task's workspace
@@ -38,9 +42,9 @@ enum CliCommands {
         /// The task; a picker when omitted
         task: Option<String>,
     },
-    /// Go back to a task: its agent, or claude resuming the last session there
+    /// Go back to a task: its agent, or its CLI resuming the last session there
     Select(SelectArgs),
-    /// (internal) Run in a new tab by start/add: create the worktree, then claude
+    /// (internal) Run in a new tab by start/add: create the worktree, then the agent
     #[command(hide = true)]
     Prepare { spec: PathBuf },
     /// (for agents) Append a finding to the task note's "Agent notes"
@@ -95,7 +99,7 @@ pub(crate) struct StartArgs {
     /// No worktree: the agent works in the main checkout
     #[arg(long)]
     pub(crate) no_worktree: bool,
-    /// No claude: the worktree tab gets a shell. With --no-worktree too, only
+    /// No agent: the worktree tab gets a shell. With --no-worktree too, only
     /// the note
     #[arg(long)]
     pub(crate) no_agent: bool,
@@ -163,6 +167,12 @@ struct DoneArgs {
 pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let mut projects = load_projects().map_err(|err| err.to_string())?;
+    if let Some(agent) = cli.agent {
+        for project in &mut projects {
+            project.workflow.agent = agent;
+            project.workflow.agent_override = Some(agent);
+        }
+    }
     let cwd = std::env::current_dir().ok();
     let command = match cli.command {
         None | Some(CliCommands::Tui {}) => {
@@ -207,4 +217,30 @@ fn load(config: &Config) -> Result<Vec<Task>, String> {
 /// Colors on a terminal only, and never with NO_COLOR set.
 fn colors(stream: &impl IsTerminal) -> bool {
     stream.is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    #[test]
+    fn agent_can_be_selected_before_or_after_subcommand() {
+        for args in [
+            vec!["wt", "--agent", "codex", "start", "task"],
+            vec!["wt", "start", "task", "--agent", "codex"],
+            vec!["wt", "review", "--agent", "codex"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap().agent,
+                Some(AgentKind::Codex)
+            );
+        }
+        assert_eq!(
+            Cli::try_parse_from(["wt", "--agent", "claude"])
+                .unwrap()
+                .agent,
+            Some(AgentKind::Claude)
+        );
+        assert!(Cli::try_parse_from(["wt", "--agent", "other"]).is_err());
+    }
 }

@@ -14,6 +14,7 @@ mod markdown;
 mod new_task;
 mod project;
 mod rows;
+mod settings;
 
 use crate::client::herdr;
 use crate::config::Config;
@@ -143,6 +144,8 @@ struct App {
     /// Where the last frame drew the list and the details: mouse targets.
     list_area: Rect,
     details_area: Rect,
+    /// The visible Settings button in the header.
+    settings_area: Rect,
     /// Panes whose unnamed agent was given a name: asked once while unnamed.
     named: HashSet<String>,
 }
@@ -198,6 +201,7 @@ impl App {
             agents_polling: false,
             list_area: Rect::default(),
             details_area: Rect::default(),
+            settings_area: Rect::default(),
             named: HashSet::new(),
         };
         app.rebuild();
@@ -449,6 +453,12 @@ impl App {
         }
         let at = Position::new(mouse.column, mouse.row);
         if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+            if self.settings_area.contains(at) {
+                self.picker = None;
+                self.projects_focused = false;
+                self.open_settings();
+                return;
+            }
             if mouse.row == 0 {
                 return self.click_header(mouse.column);
             }

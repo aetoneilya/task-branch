@@ -301,7 +301,11 @@ impl App {
                     .check(&self.projects)
                     .and_then(|(name, dir, repo)| config::add_project(&name, &dir, repo.as_deref()))
                 {
-                    Ok(config) => {
+                    Ok(mut config) => {
+                        if let Some(agent) = self.config.workflow.agent_override {
+                            config.workflow.agent = agent;
+                            config.workflow.agent_override = Some(agent);
+                        }
                         let name = config.name.clone();
                         self.projects.push(Arc::new(config));
                         self.projects_focused = false;

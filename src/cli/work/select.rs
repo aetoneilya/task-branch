@@ -8,6 +8,7 @@ use super::common::{
 use super::launch::{Open, launch, open_agent, open_work};
 use crate::cli::SelectArgs;
 use crate::cli::load;
+use crate::client::agent::AgentKind;
 use crate::client::sessions::Session;
 use crate::client::{herdr, worktree};
 use crate::config::Config;
@@ -56,6 +57,7 @@ fn first_worktree(
         None,
     );
     let open = Open {
+        kind: config.workflow.agent,
         agent: true,
         focus: !bg,
     };
@@ -63,7 +65,7 @@ fn first_worktree(
 }
 
 /// `wt select [<task | KEY>]`: back to existing work — focus its agent, or start
-/// claude in its worktree resuming the last session, restoring the worktree if
+/// the owning CLI in its worktree resuming the last session, restoring the worktree if
 /// it was removed.
 pub(in crate::cli) fn cli_select(config: &Config, args: SelectArgs) -> Result<(), String> {
     select(config, args, &mut Terminal)
@@ -106,6 +108,9 @@ pub(crate) fn select(config: &Config, args: SelectArgs, ui: &mut dyn Ui) -> Resu
                 .collect()
         })
         .unwrap_or_default();
+    if let Some(kind) = config.workflow.agent_override {
+        sessions.retain(|s| AgentKind::from_session_key(&s.id) == kind);
+    }
     newest_first(&mut sessions, &table.sessions);
 
     if pick_session {
@@ -114,7 +119,15 @@ pub(crate) fn select(config: &Config, args: SelectArgs, ui: &mut dyn Ui) -> Resu
         }
         let items: Vec<String> = sessions
             .iter()
-            .map(|s| format!("{}  {}  {}", s.date, s.worktree, &s.id[..8.min(s.id.len())]))
+            .map(|s| {
+                format!(
+                    "{}  {}  {}  {}",
+                    s.date,
+                    s.worktree,
+                    AgentKind::from_session_key(&s.id),
+                    &AgentKind::native_id(&s.id)[..8.min(AgentKind::native_id(&s.id).len())]
+                )
+            })
             .collect();
         let chosen = &sessions[ui.pick("Session", &items)?];
         let tree = restore_worktree(config, row, &chosen.worktree, ui)?;
@@ -164,7 +177,17 @@ pub(crate) fn select(config: &Config, args: SelectArgs, ui: &mut dyn Ui) -> Resu
         table.tree(trees[ui.pick("Worktree", &items)?])
     };
 
-    if let Some(agent) = tree.agents.first().map(|a| a.name.as_str()) {
+    if let Some(agent) = tree
+        .agents
+        .iter()
+        .find(|a| {
+            config
+                .workflow
+                .agent_override
+                .is_none_or(|kind| a.kind == Some(kind))
+        })
+        .map(|a| a.name.as_str())
+    {
         if !bg {
             herdr::focus_agent(agent).map_err(err)?;
         }
@@ -176,30 +199,28 @@ pub(crate) fn select(config: &Config, args: SelectArgs, ui: &mut dyn Ui) -> Resu
     }
     let brief = brief_path(&tree.wt.path)?;
     launch(
+        config.workflow.agent,
         &space,
         &tree.wt.path,
         &tree.wt.name(),
-        note,
-        &brief,
+        (note, &brief),
         !bg,
         ui,
     )
 }
 
-/// Newest first: by date, and sessions of one day by their transcript's last
-/// activity, when the transcript is still there.
+/// Most recently active transcript first; saved date breaks ties or missing files.
 fn newest_first(sessions: &mut [SessionRef], transcripts: &HashMap<String, Session>) {
     let modified = |s: &SessionRef| transcripts.get(&s.id).map(|t| t.modified);
     sessions.sort_by(|a, b| {
-        b.date
-            .cmp(&a.date)
-            .then_with(|| modified(b).cmp(&modified(a)))
+        modified(b)
+            .cmp(&modified(a))
+            .then_with(|| b.date.cmp(&a.date))
     });
 }
 
-/// `claude --resume` must run where the session was launched — often the main
-/// checkout, not the worktree. A transcript already deleted by Claude Code's
-/// cleanup leaves only a fresh start.
+/// Resume with the owning CLI in its original launch directory when available.
+/// Claude's deleted transcript falls back to a fresh conversation.
 fn resume(
     table: &Table,
     space: &str,
@@ -209,12 +230,12 @@ fn resume(
     bg: bool,
     ui: &mut dyn Ui,
 ) -> Result<(), String> {
-    // a session still open in an agent: a second claude on it would interleave
+    // A session already open in an agent must be focused instead of opened twice:
     // two conversations in one transcript
     if let Some(agent) = herdr::list_agents()
         .unwrap_or_default()
         .into_iter()
-        .find(|a| a.session_id() == Some(session.id.as_str()))
+        .find(|a| a.matches_session(&session.id, &table.sessions))
     {
         let name = agent.name.clone().unwrap_or(agent.pane_id.clone());
         if !bg {
@@ -223,28 +244,34 @@ fn resume(
         ui.say(format!("the session is open in agent {name} → {name}"));
         return Ok(());
     }
-    let Some(transcript) = table.sessions.get(&session.id) else {
+    let kind = AgentKind::from_session_key(&session.id);
+    let transcript = table.sessions.get(&session.id);
+    if transcript.is_none() && kind == AgentKind::Claude {
         ui.say(format!(
-            "Claude Code has already deleted conversation {} — starting a new session",
+            "{kind} conversation {} is unavailable — starting a new session",
             session.id
         ));
         let brief = brief_path(tree)?;
-        return launch(space, tree, &session.worktree, note, &brief, !bg, ui);
-    };
+        return launch(
+            kind,
+            space,
+            tree,
+            &session.worktree,
+            (note, &brief),
+            !bg,
+            ui,
+        );
+    }
+    // Codex can resume from its own history DB or compressed rollout even when
+    // no plain JSONL transcript was discoverable here.
     let launch_dir = transcript
-        .first_cwd
-        .as_deref()
+        .and_then(|s| s.first_cwd.as_deref())
         .map(PathBuf::from)
         .filter(|p| p.exists())
         .unwrap_or_else(|| tree.to_path_buf());
-    open_agent(
-        space,
-        &launch_dir,
-        &session.worktree,
-        &["--resume", &session.id],
-        !bg,
-        ui,
-    )
+    let args = kind.resume_args(&session.id);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    open_agent(kind, space, &launch_dir, &session.worktree, &args, !bg, ui)
 }
 
 /// The worktree directory, recreated at the same path from its branch if it was
@@ -346,6 +373,38 @@ fn pick_work(table: &Table, ui: &mut dyn Ui) -> Result<Work, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resumed_older_conversation_is_newer_than_an_idle_new_one() {
+        let entry = |id: &str, date: &str| SessionRef {
+            id: id.into(),
+            date: date.into(),
+            worktree: "task".into(),
+        };
+        let mut saved = vec![
+            entry("new", "2026-10-29"),
+            entry("codex:resumed", "2026-10-01"),
+        ];
+        let transcripts = saved
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                (
+                    s.id.clone(),
+                    Session {
+                        id: s.id.clone(),
+                        date: s.date.clone(),
+                        cwds: vec![],
+                        first_cwd: None,
+                        last_cwd: None,
+                        modified: 100 + i as u64,
+                    },
+                )
+            })
+            .collect();
+        newest_first(&mut saved, &transcripts);
+        assert_eq!(saved[0].id, "codex:resumed");
+    }
 
     #[test]
     fn resumes_the_latest_session_of_the_day() {

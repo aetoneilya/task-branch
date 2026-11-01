@@ -28,7 +28,21 @@ impl App {
             Layout::horizontal([Constraint::Percentage(100), Constraint::Length(0)]).areas(body)
         };
 
-        frame.render_widget(self.header(), header);
+        let [header_text, settings_button] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(super::settings::BUTTON.len() as u16),
+        ])
+        .areas(header);
+        self.settings_area = settings_button;
+        frame.render_widget(self.header(), header_text);
+        frame.render_widget(
+            Paragraph::new(super::settings::BUTTON).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            settings_button,
+        );
         if show_prompt {
             let (label, text) = match &self.prompt {
                 Some((Prompt::Filter, text)) => ("/ ".to_string(), text.clone()),
@@ -158,12 +172,11 @@ impl App {
                     if !tree.agents.is_empty() {
                         keys.push(("⏎", "agent".into()));
                     } else if self.target().is_some() {
-                        keys.push(("⏎", "resume claude".into()));
+                        keys.push(("⏎", "resume session".into()));
                     }
                     if has_url {
                         keys.push(("b", if tree.mr.is_some() { "MR" } else { "jira" }.into()));
                     }
-                    keys.push(("R", "review".into()));
                     keys.push(("d", "done".into()));
                 }
                 Kind::Agent(at, _) => {
@@ -172,7 +185,6 @@ impl App {
                         keys.push(("b", "browser".into()));
                     }
                     if let AgentAt::Tree(_) = at {
-                        keys.push(("R", "review".into()));
                         keys.push(("d", "done".into()));
                     }
                 }
@@ -317,16 +329,17 @@ impl App {
             "↑↓ j k     move             ← h  fold / to parent        → l  unfold        space  fold",
             "z          fold all / unfold all",
             "↑ at top   project dropdown: ⏎ opens it, ⏎ on \"+ new project\" adds one   Tab ] [  next / previous project",
-            "⏎          agent: focus; worktree: its agent or claude --resume; task: wt select",
+            "⏎          agent: focus; worktree: its agent or a resumed session; task: wt select",
             "b          ticket / MR in the browser   o  note in Obsidian       e  note in $EDITOR",
             "i          worktree in IntelliJ IDEA ([workflow] ide); on a task: its only worktree",
             "s          ticket: wt start KEY; task: add a ticket (wt add)",
             "c          pick a session (wt select --session); ⏎ on \"+ new task\": wt start",
             "a          ticket without a task: attach it to a task (wt attach)",
             "N          add a dated line to the task note",
-            "R          review worktree (wt review)  d  worktree: remove it; task: close it with its Jira tickets",
+            "d          worktree: remove it; task: close it with its Jira tickets",
             "/          filter, Esc clears           .  all / active only      r  refresh",
             "v          show / hide tickets, MRs, worktrees with agents",
+            "Settings   button in the header: default agent for new conversations",
             "mouse      wheel scrolls the list or the details, click selects, again folds",
             "w          next agent waiting for you (blocked, or done and unseen)",
             "p          show / hide details (hidden by default under 110 columns)",

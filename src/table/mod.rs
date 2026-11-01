@@ -1,5 +1,5 @@
 //! The table: task notes joined with their Jira tickets, GitLab MRs, worktrees,
-//! herdr agents and claude sessions. `fetch` collects the raw inputs, `matching`
+//! herdr agents and agent sessions. `fetch` collects the raw inputs, `matching`
 //! joins them, `view` decides what is shown and how it nests.
 
 mod fetch;
@@ -138,9 +138,10 @@ pub struct Agent {
     pub pane: String,
     pub tab: String,
     pub status: AgentStatus,
+    pub kind: Option<crate::client::agent::AgentKind>,
     /// The herdr workspace it runs in.
     pub workspace: String,
-    /// Unix time its claude session last wrote to the transcript.
+    /// Unix time its session last wrote to the transcript.
     pub active: Option<u64>,
 }
 
@@ -156,10 +157,14 @@ impl Agent {
             pane: agent.pane_id.clone(),
             tab: agent.tab_id.clone(),
             status: AgentStatus::parse(&agent.agent_status),
+            kind: agent.kind().or_else(|| {
+                agent
+                    .session(sessions)
+                    .map(|s| crate::client::agent::AgentKind::from_session_key(&s.id))
+            }),
             workspace: agent.workspace_id.clone(),
             active: agent
-                .session_id()
-                .and_then(|id| sessions.get(id))
+                .session(sessions)
                 .map(|s| s.modified)
                 .filter(|&m| m > 0),
         }
@@ -301,7 +306,7 @@ pub struct Table {
     pub tickets: HashMap<String, Ticket>,
     pub mrs: Vec<Mr>,
     pub trees: Vec<Tree>,
-    /// Claude sessions of the main checkouts, worktrees and open tasks, by id.
+    /// Claude and Codex sessions of the main checkouts, worktrees and open tasks, by id.
     pub sessions: HashMap<String, sessions::Session>,
     pub jira: Source,
     pub gitlab: Source,

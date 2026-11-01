@@ -1,3 +1,4 @@
+use crate::client::agent::AgentKind;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,8 +29,17 @@ pub struct GitLabConfig {
 pub struct WorkflowConfig {
     /// Prepended to new task branches, e.g. "i.udalov/".
     pub branch_prefix: String,
-    /// Model for `wt review`; the claude default when empty.
+    /// CLI used for new conversations; existing conversations keep their owner.
+    pub agent: AgentKind,
+    /// Optional separate CLI for reviews.
+    pub review_agent: Option<AgentKind>,
+    /// An explicit --agent filter for this invocation only.
+    #[serde(skip)]
+    pub agent_override: Option<AgentKind>,
+    /// Model for Claude reviews; Claude's default when empty.
     pub review_model: Option<String>,
+    /// Model for Codex reviews; Codex's configured default when empty.
+    pub codex_review_model: Option<String>,
     /// macOS app the TUI's `i` opens a worktree in.
     pub ide: String,
 }
@@ -38,7 +48,11 @@ impl Default for WorkflowConfig {
     fn default() -> Self {
         WorkflowConfig {
             branch_prefix: String::new(),
+            agent: AgentKind::Claude,
+            review_agent: None,
+            agent_override: None,
             review_model: None,
+            codex_review_model: None,
             ide: "IntelliJ IDEA".to_string(),
         }
     }
@@ -100,6 +114,8 @@ struct ProjectFile {
     new_task_dir: Option<PathBuf>,
     /// Default: `[workflow] branch_prefix`.
     branch_prefix: Option<String>,
+    /// Default: [workflow] agent.
+    agent: Option<AgentKind>,
     #[serde(default, rename = "repo")]
     repos: Vec<RepoConfig>,
 }
@@ -118,6 +134,9 @@ impl FileConfig {
                 let mut workflow = self.workflow.clone();
                 if let Some(prefix) = p.branch_prefix {
                     workflow.branch_prefix = prefix;
+                }
+                if let Some(agent) = p.agent {
+                    workflow.agent = agent;
                 }
                 Ok(Config {
                     name: p.name,
@@ -186,6 +205,76 @@ pub fn load_projects() -> Result<Vec<Config>, ConfigError> {
         .map_err(|e| ConfigError::Invalid(config_path.clone(), e))?;
     if projects.is_empty() {
         return Err(ConfigError::Invalid(config_path, "no [[project]]".into()));
+    }
+    Ok(projects)
+}
+
+/// Global preferences edited in the TUI. Project and command-line overrides
+/// still take precedence over these defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct Settings {
+    pub default_agent: AgentKind,
+}
+
+pub fn load_settings() -> Result<Settings, String> {
+    let path = config_path();
+    let text =
+        fs::read_to_string(&path).map_err(|e| ConfigError::Read(path.clone(), e).to_string())?;
+    let file: FileConfig =
+        toml::from_str(&text).map_err(|e| ConfigError::Parse(path, e).to_string())?;
+    Ok(Settings {
+        default_agent: file.workflow.agent,
+    })
+}
+
+/// Updates only the preferences; comments, unknown keys and project overrides
+/// are kept. Return the effective project defaults for the running TUI.
+pub fn save_settings(settings: Settings) -> Result<Vec<Config>, String> {
+    save_settings_at(&config_path(), settings)
+}
+
+fn save_settings_at(path: &Path, settings: Settings) -> Result<Vec<Config>, String> {
+    // A config managed through a symlink must keep pointing at the same file.
+    let target =
+        fs::canonicalize(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let path = target.as_path();
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("can't parse {}: {e}", path.display()))?;
+    if !doc.contains_key("workflow") {
+        doc["workflow"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let workflow = doc["workflow"]
+        .as_table_like_mut()
+        .ok_or("workflow must be a table")?;
+    if let Some(value) = workflow
+        .get_mut("agent")
+        .and_then(toml_edit::Item::as_value_mut)
+    {
+        let decor = value.decor().clone();
+        *value = toml_edit::Value::from(settings.default_agent.binary());
+        *value.decor_mut() = decor;
+    } else {
+        workflow.insert("agent", toml_edit::value(settings.default_agent.binary()));
+    }
+    let text = doc.to_string();
+    // Validate the whole config before touching the file.
+    let file: FileConfig = toml::from_str(&text).map_err(|e| e.to_string())?;
+    let projects = file.projects()?;
+    if projects.is_empty() {
+        return Err("no [[project]]".into());
+    }
+    let temp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    let result = (|| {
+        fs::write(&temp, text)?;
+        fs::set_permissions(&temp, fs::metadata(path)?.permissions())?;
+        fs::rename(&temp, path)
+    })();
+    if let Err(e) = result {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("can't save {}: {e}", path.display()));
     }
     Ok(projects)
 }
@@ -272,6 +361,122 @@ pub enum ConfigError {
 mod tests {
     use super::*;
 
+    struct SettingsFile(PathBuf);
+
+    impl SettingsFile {
+        fn new(text: &str) -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "wt-settings-{}-{}.toml",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::write(&path, text).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for SettingsFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn settings_preserve_comments_unknown_keys_and_project_overrides() {
+        let text = "# my config\n[vault]\npath = '/v'\n[workflow]\nagent = 'claude' # keep this\nide = 'Editor'\ncustom = 42\n\n[[project]]\nname = 'shared'\ntask_dirs = ['tasks']\n\n[[project]]\nname = 'own'\ntask_dirs = ['other']\nagent = 'claude'\n";
+        let file = SettingsFile::new(text);
+        let projects = save_settings_at(
+            &file.0,
+            Settings {
+                default_agent: AgentKind::Codex,
+            },
+        )
+        .unwrap();
+        let saved = fs::read_to_string(&file.0).unwrap();
+        assert_eq!(
+            saved,
+            text.replacen("agent = 'claude'", "agent = \"codex\"", 1)
+        );
+        assert_eq!(projects[0].workflow.agent, AgentKind::Codex);
+        assert_eq!(projects[1].workflow.agent, AgentKind::Claude);
+        let reloaded: FileConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.workflow.agent, AgentKind::Codex);
+    }
+
+    #[test]
+    fn settings_support_missing_and_inline_workflow_tables() {
+        for workflow in ["", "workflow = { ide = 'Editor' }\n"] {
+            let file = SettingsFile::new(&format!(
+                "{workflow}[vault]\npath = '/v'\n[[project]]\nname = 'p'\ntask_dirs = ['tasks']\n"
+            ));
+            let projects = save_settings_at(
+                &file.0,
+                Settings {
+                    default_agent: AgentKind::Codex,
+                },
+            )
+            .unwrap();
+            assert_eq!(projects[0].workflow.agent, AgentKind::Codex);
+            assert_eq!(
+                projects[0].workflow.ide,
+                if workflow.is_empty() {
+                    "IntelliJ IDEA"
+                } else {
+                    "Editor"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_config_is_left_intact() {
+        for text in [
+            "[broken",
+            "[vault]\npath = '/v'\nproject = []",
+            "[vault]\npath = '/v'\n[[project]]\nname = 'p'\ntask_dirs = []",
+        ] {
+            let file = SettingsFile::new(text);
+            assert!(
+                save_settings_at(
+                    &file.0,
+                    Settings {
+                        default_agent: AgentKind::Codex
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read_to_string(&file.0).unwrap(), text);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn saving_through_a_symlink_keeps_the_link_and_file_permissions() {
+        use std::os::unix::{fs::PermissionsExt, fs::symlink};
+        let file = SettingsFile::new(
+            "[vault]\npath = '/v'\n[[project]]\nname = 'p'\ntask_dirs = ['tasks']\n",
+        );
+        fs::set_permissions(&file.0, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = SettingsFile(file.0.with_extension("link"));
+        symlink(&file.0, &link.0).unwrap();
+        save_settings_at(
+            &link.0,
+            Settings {
+                default_agent: AgentKind::Codex,
+            },
+        )
+        .unwrap();
+        assert!(fs::symlink_metadata(&link.0).unwrap().is_symlink());
+        assert_eq!(
+            fs::metadata(&file.0).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let reloaded: FileConfig = toml::from_str(&fs::read_to_string(&file.0).unwrap()).unwrap();
+        assert_eq!(reloaded.workflow.agent, AgentKind::Codex);
+    }
+
     #[test]
     fn projects_share_the_vault_and_defaults() {
         let file: FileConfig = toml::from_str(
@@ -312,6 +517,51 @@ mod tests {
         assert_eq!(choose_project(&projects, None, None), Ok(0));
         assert_eq!(choose_project(&projects, Some("VPN"), None), Ok(1));
         assert!(choose_project(&projects, Some("kitten"), None).is_err());
+    }
+
+    #[test]
+    fn agent_defaults_and_project_overrides_are_backward_compatible() {
+        let text = r#"
+            [vault]
+            path = "/v"
+            [[project]]
+            name = "legacy"
+            task_dirs = ["tasks"]
+        "#;
+        let file: FileConfig = toml::from_str(text).unwrap();
+        assert_eq!(
+            file.projects().unwrap()[0].workflow.agent,
+            AgentKind::Claude
+        );
+        let text = r#"
+            [vault]
+            path = "/v"
+            [workflow]
+            agent = "codex"
+            review_agent = "claude"
+            review_model = "claude-review-model"
+            codex_review_model = "codex-review-model"
+            [[project]]
+            name = "default"
+            task_dirs = ["tasks"]
+            [[project]]
+            name = "override"
+            task_dirs = ["other"]
+            agent = "claude"
+        "#;
+        let file: FileConfig = toml::from_str(text).unwrap();
+        let projects = file.projects().unwrap();
+        assert_eq!(projects[0].workflow.agent, AgentKind::Codex);
+        assert_eq!(projects[1].workflow.agent, AgentKind::Claude);
+        assert_eq!(projects[0].workflow.review_agent, Some(AgentKind::Claude));
+        assert_eq!(
+            projects[0].workflow.codex_review_model.as_deref(),
+            Some("codex-review-model")
+        );
+        assert!(
+            toml::from_str::<FileConfig>(&text.replace("agent = \"codex\"", "agent = \"typo\""))
+                .is_err()
+        );
     }
 
     #[test]

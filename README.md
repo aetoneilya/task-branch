@@ -2,7 +2,7 @@
 
 worktable joins Jira tickets, GitLab merge requests, git worktrees,
 [herdr](https://herdr.dev) agents and task notes in an Obsidian vault into one
-table. A task is a markdown note; its tickets, MRs, worktrees, agents and claude
+table. A task is a markdown note; its tickets, MRs, worktrees, agents and Claude/Codex
 sessions are found from branch names, herdr workspaces and transcripts. `wt`
 shows the table as a TUI or as plain text and runs the daily workflow: start a
 task, add a ticket to it, go back to it, review, close. `DESIGN.md` has the
@@ -25,6 +25,9 @@ path = "~/machrist-vault"
 
 [workflow]                  # defaults for every project
 branch_prefix = "i.udalov/"
+# agent = "codex"             # claude (default) or codex, for new conversations
+# review_agent = "claude"     # optional, defaults to agent
+# codex_review_model = "your-codex-model"
 # review_model = "claude-fable-5-1"
 # ide = "IntelliJ IDEA"
 
@@ -43,6 +46,7 @@ gitlab_project = "ai/ucp"
 name = "vpn"
 task_dirs = ["10-ah-fuck-life/projects/vpn"]
 branch_prefix = ""
+# agent = "claude"            # optional per-project override
 
 [[project.repo]]
 path = "~/code/pet-projects/vpn-bot"
@@ -60,10 +64,10 @@ each fetch, the matching and the rendering took to stderr.
 
 ```
 wt                         the TUI (also `wt tui`)
-wt start [<task|KEY>]      new task: note, herdr workspace, worktree tab with claude
+wt start [<task|KEY>]      new task: note, herdr workspace, worktree tab with an agent
 wt add [<task>] <KEY>      add a ticket to a task, with its own worktree tab
 wt attach <KEY> [<task>]   put a ticket into a task without a worktree
-wt select [<task|KEY>]     go back to a task: its agent, or claude resuming its session; a task with nothing yet gets its first worktree
+wt select [<task|KEY>]     go back to a task: its agent, or the owning CLI resuming its session; a task with nothing yet gets its first worktree
 wt note "<text>"           (for agents) append a finding to the note's "Agent notes"
 wt status                  the table in plain text; updates `state` and `sessions` in notes
 wt review [<worktree>]     start a reviewer agent next to the worktree's agent
@@ -76,15 +80,52 @@ wt completions <shell>     shell completion script
 
 `wt <command> --help` lists the options.
 
+## Claude and Codex
+
+```sh
+wt start "new task" --agent codex
+wt add "existing task" UCP-123 --agent claude
+wt select "existing task" --agent codex
+wt review --agent claude
+wt --agent codex              # TUI: use Codex for new work in this invocation
+```
+
+`--agent` is accepted before or after the subcommand. Without it, new work uses
+`[[project]] agent`, then `[workflow] agent`, then Claude for compatibility.
+Reviews use `review_agent` when configured; `--agent` overrides it too.
+`review_model` applies to Claude reviews and `codex_review_model` to Codex reviews;
+when omitted, each CLI keeps its own configured model.
+
+`wt select` without an override focuses an existing agent or resumes the most
+recently active conversation using its original CLI. With `--agent`, it focuses
+or resumes that CLI only, starting a new conversation when none exists.
+Switching CLIs starts a separate conversation with the task note and brief as
+shared context; it does not translate the other CLI's transcript.
+
+The session picker labels each entry with its CLI. Historical bare session ids
+in task notes remain Claude ids; Codex entries use `codex:<id>`. Both stores are
+discovered (`CLAUDE_CONFIG_DIR/projects` and `CODEX_HOME/sessions`, defaulting to
+`~/.claude` and `~/.codex`). Codex subagents are excluded. The parsed cache is
+`sessions-v3.json`; the previous cache can be left in place. Worktree paths stay
+under `<repo>/.claude/worktrees/` for both tools.
+
 ## TUI
 
 `?` shows all keys. The main ones:
 
+Click **[ Settings ]** in the header to open preferences (`,` also works
+from the keyboard). The first option is **Default agent** (Claude / Codex):
+←→ or space changes the value, Enter saves, Esc cancels. It updates
+`[workflow] agent` in the config and takes effect immediately for new
+conversations. A project's own `agent` and the command-line `--agent` take
+precedence; existing sessions keep their original agent. More preferences can
+be added to the same Settings window.
+
 - `↑↓`/`jk` move, `←→`/`hl`/space fold, `z` fold / unfold all, `/` filter, `.` all / active only, `v` hide MRs, worktrees, …
 - `⏎` focus the agent, or resume work (`wt select`)
-- `+ new task` row above the tasks: ⏎ or a click opens a form (name, one Jira dropdown: none, new ticket and the open tickets without a task, filtered by typing; checkboxes worktree, agent); `s` start a ticket / add one to a task, `a` attach a ticket
+- `+ new task` row above the tasks: ⏎ or a click opens a form (name, one Jira dropdown: none, new ticket and the open tickets without a task, filtered by typing; a worktree checkbox and an agent dropdown: claude, codex or none); `s` start a ticket / add one to a task, `a` attach a ticket
 - `b` browser, `o` note in Obsidian, `e` note in `$EDITOR`, `i` worktree in the IDE
-- `R` review, `d` remove a worktree / close a task
+- `d` remove a worktree / close a task
 - `w` next agent waiting for you, `p` details pane, `r` refresh, `q` quit
 
 ## herdr popup

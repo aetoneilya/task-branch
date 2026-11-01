@@ -1,9 +1,12 @@
+use super::agent::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-/// A Claude Code conversation, stored as `<projects dir>/<launch cwd slug>/<id>.jsonl`.
+/// A Claude or Codex conversation. Codex ids use a `codex:` prefix; historical
+/// bare ids remain Claude ids.
 /// The launch directory is not where the work happened: an agent started in the
 /// main checkout often moves into a worktree, so the transcript's `cwd` fields
 /// are what ties a session to a worktree.
@@ -76,11 +79,12 @@ struct Entry {
 pub struct Cache {
     entries: HashMap<String, Entry>,
     dirty: bool,
+    codex: Option<Vec<Session>>,
 }
 
 impl Cache {
     fn path() -> PathBuf {
-        crate::config::cache_dir().join("sessions-v2.json")
+        crate::config::cache_dir().join("sessions-v3.json")
     }
 
     pub fn load() -> Cache {
@@ -91,6 +95,7 @@ impl Cache {
         Cache {
             entries,
             dirty: false,
+            codex: None,
         }
     }
 
@@ -118,7 +123,7 @@ impl Cache {
         self.dirty |= self.entries.len() != before;
     }
 
-    fn session(&mut self, file: &Path) -> Option<Session> {
+    fn session(&mut self, file: &Path, kind: AgentKind) -> Option<Session> {
         let meta = std::fs::metadata(file).ok()?;
         let len = meta.len();
         let mtime = meta
@@ -139,7 +144,10 @@ impl Cache {
         }
         let session = Session {
             modified: mtime,
-            ..parse(file)?
+            ..match kind {
+                AgentKind::Claude => parse_claude(file)?,
+                AgentKind::Codex => parse_codex(file)?,
+            }
         };
         self.entries.insert(
             key,
@@ -154,24 +162,126 @@ impl Cache {
     }
 }
 
-/// Sessions launched with `cwd` as their working directory. They outlive the
-/// directory itself, e.g. a removed worktree.
+/// Claude sessions in its launch directory, plus Codex sessions that worked in
+/// this directory or below it. Codex's recursive store is scanned once per build.
 pub fn sessions_in(cwd: &Path, cache: &mut Cache) -> Vec<Session> {
-    let Some(dir) = projects_dir().map(|p| p.join(slug(cwd))) else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .filter_map(|p| cache.session(&p))
-        .collect()
+    let mut found = Vec::new();
+    if let Some(dir) = projects_dir().map(|p| p.join(slug(cwd)))
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        found.extend(
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+                .filter_map(|p| cache.session(&p, AgentKind::Claude)),
+        );
+    }
+    if cache.codex.is_none() {
+        let base = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|p| p.join(".codex")));
+        let mut codex = Vec::new();
+        if let Some(base) = base {
+            for file in rollout_files(&base.join("sessions")) {
+                if let Some(session) = cache.session(&file, AgentKind::Codex) {
+                    codex.push(session);
+                }
+            }
+        }
+        cache.codex = Some(codex);
+    }
+    found.extend(
+        cache
+            .codex
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter(|session| {
+                session
+                    .cwds
+                    .iter()
+                    .any(|(path, _)| Path::new(path).starts_with(cwd))
+            })
+            .cloned(),
+    );
+    found
 }
 
-fn parse(file: &Path) -> Option<Session> {
+fn rollout_files(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Do not follow symlink directories into unrelated stores.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            found.extend(rollout_files(&path));
+        } else if kind.is_file()
+            && path.extension().is_some_and(|e| e == "jsonl")
+            && entry.file_name().to_string_lossy().starts_with("rollout-")
+        {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
+}
+
+fn parse_codex(file: &Path) -> Option<Session> {
+    let reader = std::io::BufReader::new(std::fs::File::open(file).ok()?);
+    let (mut id, mut date) = (None, None);
+    let (mut first_cwd, mut last_cwd) = (None, None);
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let payload = &record["payload"];
+        match record["type"].as_str() {
+            Some("session_meta") => {
+                // Review/implementation children duplicate the parent's work;
+                // they are not user conversations to resume from a task note.
+                if payload["source"].get("subagent").is_some() {
+                    return None;
+                }
+                id = payload["id"]
+                    .as_str()
+                    .or_else(|| payload["session_id"].as_str())
+                    .map(str::to_string);
+                date = payload["timestamp"]
+                    .as_str()
+                    .or_else(|| record["timestamp"].as_str())
+                    .and_then(|t| t.get(..10))
+                    .map(str::to_string);
+            }
+            Some("turn_context") => {}
+            _ => continue,
+        }
+        if let Some(cwd) = payload["cwd"].as_str() {
+            *counts.entry(cwd.to_string()).or_default() += 1;
+            first_cwd.get_or_insert_with(|| cwd.to_string());
+            last_cwd = Some(cwd.to_string());
+        }
+    }
+    let mut cwds: Vec<_> = counts.into_iter().collect();
+    cwds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Some(Session {
+        id: AgentKind::Codex.session_key(&id?),
+        date: date?,
+        cwds,
+        first_cwd,
+        last_cwd,
+        modified: 0,
+    })
+}
+
+fn parse_claude(file: &Path) -> Option<Session> {
     let id = file.file_stem()?.to_string_lossy().to_string();
     let bytes = std::fs::read(file).ok()?;
     let text = String::from_utf8_lossy(&bytes);
@@ -261,10 +371,14 @@ mod tests {
         let kept = dir.join("kept.jsonl");
         std::fs::write(&kept, r#"{"cwd":"/a","timestamp":"2026-10-08T10:00:00Z"}"#).unwrap();
         let mut cache = Cache::default();
-        assert!(cache.session(&kept).is_some_and(|s| s.modified > 0));
+        assert!(
+            cache
+                .session(&kept, AgentKind::Claude)
+                .is_some_and(|s| s.modified > 0)
+        );
         let gone = dir.join("gone.jsonl");
         std::fs::write(&gone, r#"{"cwd":"/b","timestamp":"2026-10-09T10:00:00Z"}"#).unwrap();
-        cache.session(&gone).unwrap();
+        cache.session(&gone, AgentKind::Claude).unwrap();
         std::fs::remove_file(&gone).unwrap();
         cache.dirty = false;
 
@@ -272,6 +386,51 @@ mod tests {
         let files: Vec<&String> = cache.entries.keys().collect();
         assert_eq!(files, vec![&kept.to_string_lossy().to_string()]);
         assert!(cache.dirty);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn codex_metadata_and_turn_contexts_are_parsed_without_tool_output() {
+        let dir = std::env::temp_dir().join(format!("wt-codex-parse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rollout-fixture.jsonl");
+        let records = [
+            serde_json::json!({"type": "session_meta", "timestamp": "2026-10-29T10:00:00Z",
+                "payload": {"id": "same-id", "cwd": "/main", "source": "cli"}}),
+            serde_json::json!({"type": "turn_context", "payload": {"cwd": "/main/.claude/worktrees/task with space"}}),
+            serde_json::json!({"type": "response_item", "payload": {"cwd": "/wrong/tool-output"}}),
+        ];
+        let text = records
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file, format!("{text}\n{{trailing-partial-record")).unwrap();
+        let mut cache = Cache::default();
+        let session = cache.session(&file, AgentKind::Codex).unwrap();
+        assert_eq!(session.id, "codex:same-id");
+        assert_eq!(session.date, "2026-10-29");
+        assert_eq!(session.first_cwd.as_deref(), Some("/main"));
+        assert_eq!(
+            session.last_cwd.as_deref(),
+            Some("/main/.claude/worktrees/task with space")
+        );
+        assert_eq!(session.cwds.len(), 2);
+        assert_eq!(
+            session.worktrees_under(Path::new("/main/.claude/worktrees")),
+            ["task with space"]
+        );
+        assert!(session.modified > 0);
+        // A parsed session reused from the cache keeps its backend-qualified id.
+        assert_eq!(
+            cache.session(&file, AgentKind::Codex).unwrap().id,
+            session.id
+        );
+        let guardian = serde_json::json!({"type": "session_meta", "payload": {
+            "id": "child", "timestamp": "2026-10-29T10:00:00Z", "cwd": "/main",
+            "source": {"subagent": {"other": "guardian"}}}});
+        std::fs::write(&file, guardian.to_string()).unwrap();
+        assert!(parse_codex(&file).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

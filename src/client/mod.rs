@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod gitlab;
 pub mod herdr;
 pub mod jira;

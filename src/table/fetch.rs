@@ -1,5 +1,5 @@
 //! Everything the table is built from, read from Jira, GitLab, git, herdr and
-//! claude transcripts; as much of it at once as the dependencies allow.
+//! agent transcripts; as much of it at once as the dependencies allow.
 
 use super::matching::Inputs;
 use super::{Fresh, Mr, Source, Ticket, Tree};
@@ -210,7 +210,7 @@ fn worktree_roots(config: &Config) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Claude sessions launched in the main checkouts, in current worktrees and in
+/// Agent sessions launched in the main checkouts, in current worktrees and in
 /// worktrees open tasks already list sessions for, by id.
 fn load_sessions(
     roots: &[PathBuf],

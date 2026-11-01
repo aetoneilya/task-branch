@@ -19,7 +19,7 @@ pub struct Inputs {
     pub trees: Vec<Tree>,
     pub agents: Vec<herdr::Agent>,
     pub workspaces: Vec<herdr::Workspace>,
-    /// Claude sessions by id.
+    /// Agent sessions by id.
     pub sessions: HashMap<String, Session>,
     /// `<main checkout>/.claude/worktrees` of every repo.
     pub roots: Vec<PathBuf>,
@@ -219,8 +219,8 @@ pub fn assemble(inputs: Inputs) -> Table {
 }
 
 /// The task with its worktrees and MRs. A worktree belongs to the task by its
-/// branch's ticket key, or because an agent in the task's herdr workspace works
-/// in it; an MR by a ticket key, or by the branch of one of those worktrees.
+/// branch's ticket key, a saved session, or an agent in the task's workspace;
+/// an MR by a ticket key, or by the branch of one of those worktrees.
 fn task_row(
     task: Task,
     trees: &[Tree],
@@ -238,8 +238,12 @@ fn task_row(
             .as_ref()
             .is_some_and(|s| tree.agents.iter().any(|a| &a.workspace == s))
     };
+    let from_session = |tree: &Tree| {
+        let name = tree.wt.name();
+        task.sessions.iter().any(|s| s.worktree == name)
+    };
     let row_trees: Vec<usize> = (0..trees.len())
-        .filter(|&i| has_key(&trees[i].keys) || in_space(&trees[i]))
+        .filter(|&i| has_key(&trees[i].keys) || in_space(&trees[i]) || from_session(&trees[i]))
         .collect();
     let branches: Vec<&str> = row_trees
         .iter()
@@ -378,7 +382,7 @@ fn discover_sessions(
     found
 }
 
-/// Agents working in `dir`: where their claude session last worked, else the
+/// Agents working in `dir`: where their session last worked, else the
 /// pane's cwd — agents started in the main checkout move into worktrees.
 pub(super) fn agents_in(
     dir: &Path,
@@ -388,10 +392,7 @@ pub(super) fn agents_in(
     agents
         .iter()
         .filter(|a| {
-            let last_cwd = a
-                .session_id()
-                .and_then(|id| sessions.get(id))
-                .and_then(|s| s.last_cwd.as_deref());
+            let last_cwd = a.session(sessions).and_then(|s| s.last_cwd.as_deref());
             match last_cwd {
                 Some(cwd) => Path::new(cwd).starts_with(dir),
                 None => a.runs_in(dir),
@@ -477,6 +478,51 @@ mod tests {
         assert_eq!(row.trees, vec![table.tree_index("a2i-config")]);
         assert!(table.task_row("other").trees.is_empty());
         assert_eq!(table.other_trees, vec![table.tree_index("misc")]);
+    }
+
+    #[test]
+    fn saved_sessions_keep_a_worktree_and_its_mr_with_the_task_without_live_agents() {
+        for id in ["old-claude-session", "codex:old-codex-session"] {
+            for with_mr in [false, true] {
+                let saved_task = task_note(
+                    "herdr plugin",
+                    &format!("sessions: [\"{id} herdr-plugin 2026-10-28\"]"),
+                    "2026-10-28",
+                );
+                // No live workspace, agent, or transcript; only the note remembers it.
+                let table = table(
+                    vec![saved_task, task("other", &[])],
+                    vec![],
+                    if with_mr {
+                        vec![mr(10, "herdr-plugin", "Plugin support", "opened")]
+                    } else {
+                        vec![]
+                    },
+                    vec![
+                        tree("herdr-plugin", "herdr-plugin"),
+                        tree("herdr-plugin-old", "old"),
+                    ],
+                );
+                let row = table.task_row("herdr plugin");
+                assert_eq!(row.trees, vec![table.tree_index("herdr-plugin")]);
+                assert_eq!(row.mrs, if with_mr { vec![0] } else { vec![] });
+                assert_eq!(
+                    row.state,
+                    Some(if with_mr {
+                        TaskState::Review
+                    } else {
+                        TaskState::Active
+                    })
+                );
+                assert!(row.space.is_none());
+                assert!(table.task_row("other").trees.is_empty());
+                assert_eq!(
+                    table.other_trees,
+                    vec![table.tree_index("herdr-plugin-old")]
+                );
+                assert!(table.other_mrs.is_empty());
+            }
+        }
     }
 
     #[test]

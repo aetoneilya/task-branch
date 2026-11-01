@@ -36,11 +36,14 @@ pub(super) enum Dialog {
     /// A command running, then finished: what it said, and what it asks.
     Report(Report),
     /// `v`: which kinds of rows are shown; the selected toggle.
-    Hide { selected: usize },
+    Hide {
+        selected: usize,
+    },
     /// "+ new task": the form for `wt start`.
     NewTask(super::new_task::Form),
     /// "+ new project" in the project dropdown.
     NewProject(super::project::Form),
+    Settings(super::settings::Form),
 }
 
 impl Dialog {
@@ -404,6 +407,7 @@ impl App {
             Some(Dialog::Hide { selected }) => self.on_hide_key(key, selected),
             Some(Dialog::NewTask(form)) => self.on_new_task_key(key, form),
             Some(Dialog::NewProject(form)) => self.on_new_project_key(key, form),
+            Some(Dialog::Settings(form)) => self.on_settings_key(key, form),
             Some(Dialog::Report(mut report)) => {
                 if report.question.is_some() {
                     answer(&mut report, key);
@@ -499,6 +503,11 @@ impl App {
                 "show",
                 super::hide::lines(self.hide, *selected),
                 "↑↓ move   space toggle   Esc close",
+            ),
+            Dialog::Settings(form) => (
+                "settings",
+                super::settings::lines(form),
+                super::settings::HINT,
             ),
         };
 

@@ -167,7 +167,7 @@ impl App {
             Kind::Header(_) => {}
             Kind::NewTask => {
                 lines.push(Line::raw("⏎ a new task: a note, a herdr workspace,"));
-                lines.push(Line::raw("a worktree tab with claude (wt start)"));
+                lines.push(Line::raw("a worktree tab with an agent (wt start)"));
             }
             Kind::Agent(at, a) => {
                 lines.push(Line::from(rows::agent_spans(

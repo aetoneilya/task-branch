@@ -21,8 +21,8 @@ pub fn ticket_keys(text: &str) -> Vec<String> {
     keys
 }
 
-/// A claude session held in one of the task's worktrees, stored in the note as
-/// `<session id> <worktree name> <date>`.
+/// An agent session held in one of the task's worktrees, stored in the note as
+/// `<session id> <worktree name> <date>`; Codex ids have a `codex:` prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRef {
     pub id: String,
@@ -287,5 +287,8 @@ mod tests {
         let s = SessionRef::parse("a9c0 a2i-config 2026-10-08").unwrap();
         assert_eq!(s.worktree, "a2i-config");
         assert_eq!(s.entry(), "a9c0 a2i-config 2026-10-08");
+        let codex = SessionRef::parse("codex:a9c0 a2i-config 2026-10-29").unwrap();
+        assert_eq!(codex.entry(), "codex:a9c0 a2i-config 2026-10-29");
+        assert_ne!(codex.id, s.id);
     }
 }

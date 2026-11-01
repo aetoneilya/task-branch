@@ -99,6 +99,7 @@ pub fn agent(name: &str, tree: &str, space: &str) -> herdr::Agent {
         tab_id: format!("{space}:t"),
         workspace_id: space.to_string(),
         agent_session: None,
+        extra: Default::default(),
     }
 }
 

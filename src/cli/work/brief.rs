@@ -13,7 +13,7 @@ If you change code, you are done when:
 - you end with a short summary: what changed, how it was checked, open questions.
 If the task is ambiguous or touches more than a couple of files, start with a plan and agree on it.";
 
-/// Points claude at the task note and the brief; it reads them and waits.
+/// Points the agent at the task note and the brief; it reads them and waits.
 pub(super) fn agent_prompt(note: Option<&Path>, brief: &Path) -> Option<String> {
     let mut context = Vec::new();
     if let Some(note) = note {

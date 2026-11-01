@@ -1,3 +1,4 @@
+use super::agent::AgentKind;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::path::Path;
@@ -52,6 +53,8 @@ pub struct Agent {
     pub tab_id: String,
     pub workspace_id: String,
     pub agent_session: Option<AgentSession>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// The agent's own session handle; for claude, the session id.
@@ -63,6 +66,53 @@ pub struct AgentSession {
 impl Agent {
     pub fn session_id(&self) -> Option<&str> {
         self.agent_session.as_ref().map(|s| s.value.as_str())
+    }
+
+    pub fn kind(&self) -> Option<AgentKind> {
+        ["agent", "kind", "agent_kind", "agent_type"]
+            .iter()
+            .find_map(|key| {
+                let value = self.extra.get(*key)?;
+                match value
+                    .as_str()
+                    .or_else(|| value.get("kind").and_then(|v| v.as_str()))?
+                {
+                    "claude" | "claude-code" | "claude_code" => Some(AgentKind::Claude),
+                    "codex" => Some(AgentKind::Codex),
+                    _ => None,
+                }
+            })
+    }
+
+    /// Backend-qualified lookup; ambiguous raw ids never pick another CLI's session.
+    pub fn session<'a>(
+        &self,
+        sessions: &'a std::collections::HashMap<String, super::sessions::Session>,
+    ) -> Option<&'a super::sessions::Session> {
+        let id = self.session_id()?;
+        if let Some(kind) = self.kind() {
+            return sessions.get(&kind.session_key(id));
+        }
+        match (
+            sessions.get(id),
+            sessions.get(&AgentKind::Codex.session_key(id)),
+        ) {
+            (Some(session), None) | (None, Some(session)) => Some(session),
+            _ => None,
+        }
+    }
+
+    pub fn matches_session(
+        &self,
+        key: &str,
+        sessions: &std::collections::HashMap<String, super::sessions::Session>,
+    ) -> bool {
+        if self.session_id() != Some(AgentKind::native_id(key)) {
+            return false;
+        }
+        self.kind()
+            .map(|kind| kind == AgentKind::from_session_key(key))
+            .unwrap_or_else(|| self.session(sessions).is_some_and(|s| s.id == key))
     }
 
     pub fn runs_in(&self, dir: &Path) -> bool {
@@ -232,16 +282,9 @@ pub fn focus_agent(target: &str) -> Result<()> {
     run_herdr(&["agent", "focus", target]).map(|_| ())
 }
 
-/// Starts claude in the shell of `pane` and names the agent once herdr sees it.
-/// Typed as `command claude` rather than through `herdr agent start`: ai-launcher
-/// keeps putting a `claude` shell function into ~/.zshrc that refuses to run it.
-pub fn start_claude(name: &str, pane: &str, claude_args: &[&str]) -> Result<()> {
-    let mut command = String::from("command claude");
-    for arg in claude_args {
-        command.push(' ');
-        command.push_str(&shell_quote(arg));
-    }
-    run_in_pane(pane, &command)?;
+/// Starts the chosen CLI directly, bypassing shell wrappers, then names it.
+pub fn start_agent(kind: AgentKind, name: &str, pane: &str, args: &[&str]) -> Result<()> {
+    run_in_pane(pane, &kind.shell_command(args))?;
     name_agent_when_up(pane, name)
 }
 
@@ -299,6 +342,36 @@ pub fn rename_agent(target: &str, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_session_identity_includes_the_cli_kind() {
+        use super::super::sessions::Session;
+        let transcript = |id: &str| Session {
+            id: id.into(),
+            date: "2026-10-29".into(),
+            cwds: vec![],
+            first_cwd: None,
+            last_cwd: None,
+            modified: 1,
+        };
+        let sessions = [transcript("same"), transcript("codex:same")]
+            .into_iter()
+            .map(|s| (s.id.clone(), s))
+            .collect();
+        let mut agent: Agent = serde_json::from_value(serde_json::json!({
+            "name": "test", "agent_status": "idle", "cwd": "/main", "pane_id": "pane",
+            "tab_id": "tab", "workspace_id": "space", "agent": "codex",
+            "agent_session": {"value": "same"}
+        }))
+        .unwrap();
+        assert_eq!(agent.session(&sessions).unwrap().id, "codex:same");
+        assert!(agent.matches_session("codex:same", &sessions));
+        assert!(!agent.matches_session("same", &sessions));
+        agent.extra.clear();
+        assert!(agent.session(&sessions).is_none());
+        assert!(!agent.matches_session("same", &sessions));
+        assert!(!agent.matches_session("codex:same", &sessions));
+    }
 
     #[test]
     fn agent_names_keep_what_herdr_takes() {

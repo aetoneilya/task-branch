@@ -31,9 +31,9 @@ task  (note: shared context; any size — a "project" is just a big task)
   context: goal, decisions, constraints, plan, findings.
 - **One task = one herdr workspace** (decided 2026-10-09), labelled with the
   task name; each worktree of the task is a tab in it, with its agent. A
-  worktree belongs to a task by its branch's ticket key, or because an agent in
-  the task's workspace works in it — so a branch without a key (a quick fix
-  spun off during the task) still lands in the task.
+  worktree belongs to a task by its branch's ticket key, by its name in the
+  task's saved sessions, or because an agent in the task's workspace works in
+  it — so a branch without a key stays attached even after its agent exits.
 - **Ticket → task** is set explicitly (`wt add`, `wt attach`, `wt start <name> -k`, or by
   editing `tickets:`), and by sync: a key on a worktree or MR that belongs to the
   task (through its herdr workspace or a worktree's branch) and that no note
@@ -55,7 +55,7 @@ task  (note: shared context; any size — a "project" is just a big task)
 | branch | worktree | `git worktree list --porcelain` |
 | worktree | agent | herdr `agent list`: the last `cwd` in the agent's claude transcript (agents started in the main checkout move into worktrees), else the pane cwd |
 | agent | name | the TUI names an agent herdr knows by pane id only (herdr drops names when an agent restarts): after its tab's label, else the worktree's or task's name |
-| worktree | task | an agent working in it runs in the task's herdr workspace (label == task name) |
+| worktree | task | its name is in the task's saved sessions, or an agent working in it runs in the task's herdr workspace (label == task name) |
 | MR | MR (no key) | worktree's branch == MR source branch (MRs without a key still land in their worktree's task) |
 
 A ticket listed in two tasks is a conflict: shown in both, flagged in loose ends.
@@ -331,11 +331,12 @@ threads and conflicts. Ticket descriptions are Jira markup rendered as text.
 | `a` | ticket without a task | `wt attach KEY`: pick a task, the key joins its `tickets:` |
 | `N` | anything under a task | a dated line at the end of the note's own text |
 | `w` | — | next agent waiting for me |
+| click **[ Settings ]** in the header (or `,`) | — | default agent (←→ changes, Enter saves, Esc cancels); writes `[workflow] agent`, retaining project and CLI overrides |
 | `v` | — | what kinds of rows to show |
 | `p` | — | details pane on/off (hidden under 110 columns) |
-| `⏎`, click | "+ new task" row above the tasks | a form for `wt start`: name; one Jira dropdown (⏎ or space opens it): none, new ticket, then the open tickets without a task — assigned to me or worked on — in progress first; typing filters, a typed key is taken as is; checkboxes worktree and agent (neither: only the note); no Jira field in a project without Jira |
+| `⏎`, click | "+ new task" row above the tasks | a form for `wt start`: name; one Jira dropdown (⏎ or space opens it): none, new ticket, then the open tickets without a task — assigned to me or worked on — in progress first; typing filters, a typed key is taken as is; a worktree checkbox and an agent dropdown: claude, codex or none (no worktree and none: only the note; agent defaults to the project setting); no Jira field in a project without Jira |
 | `c` | task, ticket | `wt select --session` |
-| `R`, `d` | worktree | `wt review`, `wt done` |
+| `d` | worktree | `wt done` |
 | `d` | task | `wt done "<task>"`: close it with its Jira tickets |
 | `space` `h` `l` | — | fold, fold / to parent, unfold |
 | `z` | — | fold every top-level row; again, unfold all |

@@ -82,6 +82,7 @@ impl App {
                 self.say("refreshing…");
             }
             KeyCode::Char('?') => self.help = true,
+            KeyCode::Char(',') => self.open_settings(),
             KeyCode::Char('w') => self.next_waiting(),
             KeyCode::Char('v') => self.open_hide(),
             KeyCode::Char('N') => match self.note() {
@@ -110,14 +111,6 @@ impl App {
                         target: Some(target),
                         session: true,
                         ..SelectArgs::default()
-                    });
-                }
-            }
-            KeyCode::Char('R') => {
-                if let Some(t) = self.tree() {
-                    let name = self.table.tree(t).wt.name();
-                    self.run_command(format!("review {name}"), Then::Close, move |config, ui| {
-                        work::review(config, Some(name), ui)
                     });
                 }
             }
@@ -292,7 +285,7 @@ impl App {
     }
 
     /// ⏎: to the agent of the selection — focus a live one, otherwise `wt select`
-    /// resumes or starts claude there; an MR opens in the browser.
+    /// resumes or starts an agent there; an MR opens in the browser.
     pub(super) fn go(&mut self) {
         let Some(row) = self.current() else { return };
         match row.kind.clone() {
